@@ -10,8 +10,11 @@ const textureToggleEl = document.getElementById('textureToggle');
 const wireframeToggleEl = document.getElementById('wireframeToggle');
 const resetViewEl = document.getElementById('resetView');
 
-const LOD_META_URL = '../data/processed/ferrar-glacier/viewer/10m/terrain-lod.json';
-const LEGACY_META_URL = '../data/processed/ferrar-glacier/viewer/10m/terrain.json';
+const params = new URLSearchParams(window.location.search);
+const REGION = params.get('region') || 'ferrar-glacier';
+const RESOLUTION = params.get('resolution') || '10m';
+const LOD_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-lod.json`;
+const LEGACY_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain.json`;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -317,7 +320,7 @@ function updateLOD() {
   }
 
   if (visible > 0) {
-    setStatus(`REMA + LIMA · ${visible} tiles · LOD ${maxSelected}/${lodMeta.lod.maxLevel}`);
+    setStatus(`REMA ${RESOLUTION} + LIMA · ${visible} tiles · seam-safe LOD ${maxSelected}/${lodMeta.lod.maxLevel}`);
   }
 }
 
@@ -344,7 +347,7 @@ async function loadLODTerrain(metaResponse) {
 
   metaEl.innerHTML = [
     `<strong>${lodMeta.name}</strong>`,
-    `dynamic tiled terrain · LOD 0–${lodMeta.lod.maxLevel}`,
+    `REMA ${lodMeta.resolution} · dynamic tiled terrain · LOD 0–${lodMeta.lod.maxLevel}`,
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
@@ -356,7 +359,7 @@ async function loadLODTerrain(metaResponse) {
 async function loadLegacyTerrain() {
   const metaResponse = await fetch(LEGACY_META_URL);
   if (!metaResponse.ok) {
-    throw new Error('LOD assets are not built yet. Run scripts/build_viewer_lod_assets.sh');
+    throw new Error(`LOD assets are not built yet for ${RESOLUTION}. Run scripts/build_viewer_lod_assets.sh --resolution ${RESOLUTION}`);
   }
   const meta = await metaResponse.json();
   const base = LEGACY_META_URL.slice(0, LEGACY_META_URL.lastIndexOf('/') + 1);
@@ -437,7 +440,7 @@ async function loadLegacyTerrain() {
     `${minHeight.toFixed(0)}–${maxHeight.toFixed(0)} m source elevation`,
     '<em>Build LOD assets for higher detail.</em>',
   ].join('<br>');
-  setStatus('REMA + LIMA · legacy mesh');
+  setStatus(`REMA ${RESOLUTION} + LIMA · legacy mesh`);
 }
 
 async function loadTerrain() {
