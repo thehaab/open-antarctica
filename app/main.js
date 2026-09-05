@@ -17,7 +17,7 @@ const LOD_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-l
 const LEGACY_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain.json`;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 viewer.appendChild(renderer.domElement);
@@ -31,7 +31,7 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.screenSpacePanning = true;
-controls.minDistance = 500;
+controls.minDistance = 250;
 controls.maxDistance = 180000;
 
 scene.add(new THREE.HemisphereLight(0xd9e8ff, 0x18202b, 1.2));
@@ -44,6 +44,17 @@ scene.add(terrainGroup);
 
 const textureLoader = new THREE.TextureLoader();
 const tileCache = new Map();
+const boundsCache = new Map();
+const loadQueue = [];
+const lodFrustum = new THREE.Frustum();
+const projectionView = new THREE.Matrix4();
+
+const MAX_CONCURRENT_LOADS = 6;
+const MAX_READY_TILES = RESOLUTION === '2m' ? 72 : 96;
+const LOD_PIXEL_THRESHOLD = RESOLUTION === '2m' ? 1.35 : 1.6;
+const SKIRT_DEPTH_METERS = RESOLUTION === '2m' ? 24 : 40;
+
+let activeLoads = 0;
 let lodMeta = null;
 let lodBase = '';
 let defaultCamera = null;
@@ -53,6 +64,8 @@ let legacyTerrain = null;
 let legacyTexture = null;
 let lodFrame = 0;
 let lastStatus = '';
+let lastSelected = new Set();
+let lastMaxSelected = 0;
 
 function setStatus(text, error = false) {
   if (text === lastStatus && !error) return;
@@ -135,6 +148,10 @@ function tileKey(level, x, y) {
 }
 
 function tileBounds(level, x, y) {
+  const key = tileKey(level, x, y);
+  const cached = boundsCache.get(key);
+  if (cached) return cached;
+
   const scale = 2 ** level;
   const nx = lodMeta.lod.rootTilesX * scale;
   const ny = lodMeta.lod.rootTilesY * scale;
@@ -149,7 +166,9 @@ function tileBounds(level, x, y) {
   const ymin = ymax - depth;
   const centerX = ((xmin + xmax) * 0.5) - ((global.xmin + global.xmax) * 0.5);
   const centerZ = ((global.ymin + global.ymax) * 0.5) - ((ymin + ymax) * 0.5);
-  return { xmin, xmax, ymin, ymax, width, depth, centerX, centerZ };
+  const value = { xmin, xmax, ymin, ymax, width, depth, centerX, centerZ };
+  boundsCache.set(key, value);
+  return value;
 }
 
 function tileUrl(pattern, level, x, y) {
@@ -159,15 +178,111 @@ function tileUrl(pattern, level, x, y) {
     .replace('{y}', y);
 }
 
-function ensureTile(level, x, y) {
+function enqueueLoad(task, priority = 0) {
+  return new Promise((resolve, reject) => {
+    loadQueue.push({ task, priority, resolve, reject });
+    loadQueue.sort((a, b) => b.priority - a.priority);
+    pumpLoadQueue();
+  });
+}
+
+function pumpLoadQueue() {
+  while (activeLoads < MAX_CONCURRENT_LOADS && loadQueue.length > 0) {
+    const entry = loadQueue.shift();
+    activeLoads += 1;
+    Promise.resolve()
+      .then(entry.task)
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        activeLoads -= 1;
+        pumpLoadQueue();
+      });
+  }
+}
+
+function buildSkirtGeometry(positions, samples, depth) {
+  const edge = [];
+  for (let col = 0; col < samples; col++) edge.push(col);
+  for (let row = 1; row < samples; row++) edge.push(row * samples + (samples - 1));
+  for (let col = samples - 2; col >= 0; col--) edge.push((samples - 1) * samples + col);
+  for (let row = samples - 2; row > 0; row--) edge.push(row * samples);
+
+  const count = edge.length;
+  const skirtPositions = new Float32Array(count * 2 * 3);
+  const skirtUVs = new Float32Array(count * 2 * 2);
+  const skirtIndices = new Uint32Array(count * 6);
+
+  for (let i = 0; i < count; i++) {
+    const sourceIndex = edge[i];
+    const row = Math.floor(sourceIndex / samples);
+    const col = sourceIndex % samples;
+    const sourceOffset = sourceIndex * 3;
+    const upperOffset = i * 6;
+    const uvOffset = i * 4;
+    const x = positions[sourceOffset];
+    const y = positions[sourceOffset + 1];
+    const z = positions[sourceOffset + 2];
+    const u = col / (samples - 1);
+    const v = 1 - row / (samples - 1);
+
+    skirtPositions[upperOffset] = x;
+    skirtPositions[upperOffset + 1] = y;
+    skirtPositions[upperOffset + 2] = z;
+    skirtPositions[upperOffset + 3] = x;
+    skirtPositions[upperOffset + 4] = y - depth;
+    skirtPositions[upperOffset + 5] = z;
+
+    skirtUVs[uvOffset] = u;
+    skirtUVs[uvOffset + 1] = v;
+    skirtUVs[uvOffset + 2] = u;
+    skirtUVs[uvOffset + 3] = v;
+
+    const next = (i + 1) % count;
+    const a = i * 2;
+    const b = a + 1;
+    const c = next * 2;
+    const d = c + 1;
+    const k = i * 6;
+    skirtIndices[k] = a;
+    skirtIndices[k + 1] = b;
+    skirtIndices[k + 2] = c;
+    skirtIndices[k + 3] = c;
+    skirtIndices[k + 4] = b;
+    skirtIndices[k + 5] = d;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(skirtPositions, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(skirtUVs, 2));
+  geometry.setIndex(new THREE.BufferAttribute(skirtIndices, 1));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function ensureTile(level, x, y, priority = 0) {
   const key = tileKey(level, x, y);
   const existing = tileCache.get(key);
-  if (existing) return existing.promise;
+  if (existing) {
+    existing.lastUsed = performance.now();
+    return existing.promise;
+  }
 
-  const state = { key, level, x, y, ready: false, mesh: null, texture: null, promise: null };
+  const state = {
+    key,
+    level,
+    x,
+    y,
+    ready: false,
+    loading: true,
+    mesh: null,
+    texture: null,
+    promise: null,
+    lastUsed: performance.now(),
+  };
   tileCache.set(key, state);
 
-  state.promise = (async () => {
+  state.promise = enqueueLoad(async () => {
     const heightUrl = tileUrl(lodMeta.lod.heightPattern, level, x, y);
     const textureUrl = tileUrl(lodMeta.lod.texturePattern, level, x, y);
     const [heightResponse, loadedTexture] = await Promise.all([
@@ -225,14 +340,23 @@ function ensureTile(level, x, y) {
     mesh.position.set(bounds.centerX, 0, bounds.centerZ);
     mesh.visible = false;
     mesh.userData.tileKey = key;
+
+    const sampleSpacing = Math.max(bounds.width, bounds.depth) / (samples - 1);
+    const skirtDepth = Math.max(SKIRT_DEPTH_METERS, sampleSpacing * 3);
+    const skirt = new THREE.Mesh(buildSkirtGeometry(positions, samples, skirtDepth), material);
+    skirt.userData.isTerrainSkirt = true;
+    mesh.add(skirt);
+
     terrainGroup.add(mesh);
 
     state.mesh = mesh;
     state.texture = loadedTexture;
     state.ready = true;
+    state.loading = false;
+    state.lastUsed = performance.now();
     applyMaterialControls(mesh, loadedTexture);
     return state;
-  })().catch((error) => {
+  }, priority).catch((error) => {
     tileCache.delete(key);
     throw error;
   });
@@ -240,31 +364,53 @@ function ensureTile(level, x, y) {
   return state.promise;
 }
 
+function updateFrustum() {
+  camera.updateMatrixWorld();
+  projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  lodFrustum.setFromProjectionMatrix(projectionView);
+}
+
+function tileSphere(level, x, y) {
+  const bounds = tileBounds(level, x, y);
+  const exaggeration = Number(exaggerationEl.value);
+  const relief = (lodMeta.elevation.max - lodMeta.elevation.min) * exaggeration;
+  const center = new THREE.Vector3(bounds.centerX, relief * 0.5, bounds.centerZ);
+  const radius = Math.hypot(bounds.width * 0.5, bounds.depth * 0.5, relief * 0.5);
+  return { bounds, center, radius };
+}
+
+function tileIsVisible(level, x, y) {
+  const { center, radius } = tileSphere(level, x, y);
+  return lodFrustum.intersectsSphere(new THREE.Sphere(center, radius));
+}
+
 function shouldRefine(level, x, y) {
   if (level >= lodMeta.lod.maxLevel) return false;
-  const bounds = tileBounds(level, x, y);
-  const relief = lodMeta.elevation.max - lodMeta.elevation.min;
-  const center = new THREE.Vector3(
-    bounds.centerX,
-    relief * 0.3 * Number(exaggerationEl.value),
-    bounds.centerZ,
-  );
-  const distance = camera.position.distanceTo(center);
-  const tileSpan = Math.max(bounds.width, bounds.depth);
-  const factor = level === 0 ? 3.2 : 2.7;
-  return distance < tileSpan * factor;
+  const { bounds, center, radius } = tileSphere(level, x, y);
+  const samples = lodMeta.lod.samples;
+  const sampleSpacing = Math.max(bounds.width, bounds.depth) / (samples - 1);
+  const centerDistance = camera.position.distanceTo(center);
+  const surfaceDistance = Math.max(centerDistance - radius, sampleSpacing * 4);
+  const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
+  const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
+  const projectedSamplePixels = sampleSpacing * focalPixels / surfaceDistance;
+  return projectedSamplePixels > LOD_PIXEL_THRESHOLD;
 }
 
 function visitTile(level, x, y, selected) {
+  if (!tileIsVisible(level, x, y)) return false;
+
   const key = tileKey(level, x, y);
   const state = tileCache.get(key);
   if (!state || !state.ready) {
-    ensureTile(level, x, y).catch((error) => {
+    ensureTile(level, x, y, level).catch((error) => {
       console.error(error);
       setStatus(error.message, true);
     });
     return false;
   }
+
+  state.lastUsed = performance.now();
 
   if (shouldRefine(level, x, y)) {
     const children = [
@@ -280,7 +426,7 @@ function visitTile(level, x, y, selected) {
       const child = tileCache.get(childKey);
       if (!child || !child.ready) {
         allReady = false;
-        ensureTile(cl, cx, cy).catch((error) => {
+        ensureTile(cl, cx, cy, cl).catch((error) => {
           console.error(error);
           setStatus(error.message, true);
         });
@@ -297,8 +443,68 @@ function visitTile(level, x, y, selected) {
   return true;
 }
 
+function addAncestorsToKeep(selected) {
+  const keep = new Set(selected);
+  for (const key of selected) {
+    const [levelText, xText, yText] = key.split('/');
+    let level = Number(levelText);
+    let x = Number(xText);
+    let y = Number(yText);
+    while (level > 0) {
+      level -= 1;
+      x = Math.floor(x / 2);
+      y = Math.floor(y / 2);
+      keep.add(tileKey(level, x, y));
+    }
+  }
+  for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
+    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) keep.add(tileKey(0, x, y));
+  }
+  return keep;
+}
+
+function disposeTile(state) {
+  if (!state?.ready || !state.mesh) return;
+  terrainGroup.remove(state.mesh);
+  for (const child of state.mesh.children) {
+    if (child.geometry) child.geometry.dispose();
+  }
+  state.mesh.geometry.dispose();
+  state.texture?.dispose();
+  state.mesh.material.dispose();
+  tileCache.delete(state.key);
+}
+
+function evictTiles(selected) {
+  const keep = addAncestorsToKeep(selected);
+  const ready = [...tileCache.values()].filter((state) => state.ready);
+  if (ready.length <= MAX_READY_TILES) return;
+
+  const candidates = ready
+    .filter((state) => !keep.has(state.key))
+    .sort((a, b) => a.lastUsed - b.lastUsed);
+
+  let readyCount = ready.length;
+  for (const state of candidates) {
+    if (readyCount <= MAX_READY_TILES) break;
+    disposeTile(state);
+    readyCount -= 1;
+  }
+}
+
+function updateStatus(selected, maxSelected) {
+  const readyCount = [...tileCache.values()].filter((state) => state.ready).length;
+  const loadingCount = [...tileCache.values()].filter((state) => state.loading).length;
+  setStatus(
+    `REMA ${RESOLUTION} + LIMA · ${selected.size} visible · ${readyCount} cached` +
+    (loadingCount ? ` · ${loadingCount} loading` : '') +
+    ` · adaptive LOD ${maxSelected}/${lodMeta.lod.maxLevel}`,
+  );
+}
+
 function updateLOD() {
   if (!lodMeta) return;
+  updateFrustum();
 
   const selected = new Set();
   for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
@@ -308,20 +514,17 @@ function updateLOD() {
   }
 
   let maxSelected = 0;
-  let visible = 0;
   for (const state of tileCache.values()) {
     if (!state.ready) continue;
     const show = selected.has(state.key);
     state.mesh.visible = show;
-    if (show) {
-      visible += 1;
-      maxSelected = Math.max(maxSelected, state.level);
-    }
+    if (show) maxSelected = Math.max(maxSelected, state.level);
   }
 
-  if (visible > 0) {
-    setStatus(`REMA ${RESOLUTION} + LIMA · ${visible} tiles · seam-safe LOD ${maxSelected}/${lodMeta.lod.maxLevel}`);
-  }
+  lastSelected = selected;
+  lastMaxSelected = maxSelected;
+  evictTiles(selected);
+  updateStatus(selected, maxSelected);
 }
 
 async function loadLODTerrain(metaResponse) {
@@ -331,7 +534,7 @@ async function loadLODTerrain(metaResponse) {
 
   const roots = [];
   for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
-    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) roots.push(ensureTile(0, x, y));
+    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) roots.push(ensureTile(0, x, y, 100));
   }
   await Promise.all(roots);
 
@@ -347,10 +550,12 @@ async function loadLODTerrain(metaResponse) {
 
   metaEl.innerHTML = [
     `<strong>${lodMeta.name}</strong>`,
-    `REMA ${lodMeta.resolution} · dynamic tiled terrain · LOD 0–${lodMeta.lod.maxLevel}`,
+    `REMA ${lodMeta.resolution} · adaptive tiled terrain · LOD 0–${lodMeta.lod.maxLevel}`,
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
+    `GPU budget: ${MAX_READY_TILES} cached tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
+    'mixed LOD seams hidden with terrain skirts',
   ].join('<br>');
 
   updateLOD();
@@ -476,11 +681,12 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (lodMeta) updateLOD();
 });
 
 function animate() {
   controls.update();
-  if (lodMeta && (++lodFrame % 30 === 0)) updateLOD();
+  if (lodMeta && (++lodFrame % 45 === 0)) updateLOD();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
