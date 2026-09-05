@@ -22,29 +22,32 @@
     "rema": {
       "version": "2.0",
       "crs": "EPSG:3031",
+      "discovery": "PGC_REMA_v2_Tile_Index",
       "tiles": {
         "10m": [
           {
-            "id": "28_44",
-            "archive": "28_44_10m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/28_44/28_44_10m_v2.0.tar.gz"
+            "id": "18_34",
+            "archive": "18_34_10m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/18_34/18_34_10m_v2.0.tar.gz"
           },
           {
-            "id": "28_45",
-            "archive": "28_45_10m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/28_45/28_45_10m_v2.0.tar.gz"
+            "id": "18_35",
+            "archive": "18_35_10m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/18_35/18_35_10m_v2.0.tar.gz"
           }
         ],
         "2m": [
           {
-            "id": "28_44_1_2",
-            "archive": "28_44_1_2_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/28_44/28_44_1_2_2m_v2.0.tar.gz"
+            "id": "18_34_1_2",
+            "archive": "18_34_1_2_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/2.0/2m/18_34/18_34_1_2_2m_v2.0.tar.gz",
+            "valid_fraction": 0.87723211
           },
           {
-            "id": "28_45_1_1",
-            "archive": "28_45_1_1_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/28_45/28_45_1_1_2m_v2.0.tar.gz"
+            "id": "18_35_1_1",
+            "archive": "18_35_1_1_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/2.0/2m/18_35/18_35_1_1_2m_v2.0.tar.gz",
+            "valid_fraction": 1.0
           }
         ]
       }
