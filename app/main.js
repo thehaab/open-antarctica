@@ -17,7 +17,7 @@ const LOD_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-l
 const LEGACY_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain.json`;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 viewer.appendChild(renderer.domElement);
@@ -48,10 +48,13 @@ const boundsCache = new Map();
 const loadQueue = [];
 const lodFrustum = new THREE.Frustum();
 const projectionView = new THREE.Matrix4();
+const sphereScratch = new THREE.Sphere();
 
 const MAX_CONCURRENT_LOADS = 6;
-const MAX_READY_TILES = RESOLUTION === '2m' ? 72 : 96;
+const MAX_READY_TILES = RESOLUTION === '2m' ? 96 : 96;
+const MAX_TARGET_VISIBLE = RESOLUTION === '2m' ? 60 : 72;
 const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
+const LOD_UPDATE_INTERVAL_MS = 90;
 
 let activeLoads = 0;
 let lodMeta = null;
@@ -61,9 +64,11 @@ let sharedUV = null;
 let sharedIndex = null;
 let legacyTerrain = null;
 let legacyTexture = null;
-let lodFrame = 0;
 let lastStatus = '';
-let currentTargetLevel = 0;
+let currentRenderLevel = 0;
+let currentWantedKeys = new Set();
+let lodDirty = true;
+let lastLodUpdate = 0;
 
 function setStatus(text, error = false) {
   if (text === lastStatus && !error) return;
@@ -72,12 +77,16 @@ function setStatus(text, error = false) {
   statusEl.classList.toggle('error', error);
 }
 
+function isRootKey(key) {
+  return key.startsWith('0/');
+}
+
 function resetView() {
   if (!defaultCamera) return;
   camera.position.copy(defaultCamera.position);
   controls.target.copy(defaultCamera.target);
   controls.update();
-  updateLOD();
+  lodDirty = true;
 }
 
 function setDefaultCamera(spanX, spanZ, relief) {
@@ -145,6 +154,11 @@ function tileKey(level, x, y) {
   return `${level}/${x}/${y}`;
 }
 
+function parseTileKey(key) {
+  const [level, x, y] = key.split('/').map(Number);
+  return { level, x, y };
+}
+
 function tileBounds(level, x, y) {
   const key = tileKey(level, x, y);
   const cached = boundsCache.get(key);
@@ -176,23 +190,40 @@ function tileUrl(pattern, level, x, y) {
     .replace('{y}', y);
 }
 
-function enqueueLoad(task, priority = 0) {
+function enqueueLoad(key, task, priority = 0, onCancel = null) {
   return new Promise((resolve, reject) => {
-    loadQueue.push({ task, priority, resolve, reject });
+    loadQueue.push({ key, task, priority, resolve, reject, onCancel });
     loadQueue.sort((a, b) => b.priority - a.priority);
     pumpLoadQueue();
   });
 }
 
+function cancelStaleQueuedLoads() {
+  for (let i = loadQueue.length - 1; i >= 0; i--) {
+    const entry = loadQueue[i];
+    if (isRootKey(entry.key) || currentWantedKeys.has(entry.key)) continue;
+    loadQueue.splice(i, 1);
+    entry.onCancel?.();
+    entry.resolve(null);
+  }
+}
+
 function pumpLoadQueue() {
   while (activeLoads < MAX_CONCURRENT_LOADS && loadQueue.length > 0) {
     const entry = loadQueue.shift();
+    if (!isRootKey(entry.key) && !currentWantedKeys.has(entry.key)) {
+      entry.onCancel?.();
+      entry.resolve(null);
+      continue;
+    }
+
     activeLoads += 1;
     Promise.resolve()
       .then(entry.task)
       .then(entry.resolve, entry.reject)
       .finally(() => {
         activeLoads -= 1;
+        lodDirty = true;
         pumpLoadQueue();
       });
   }
@@ -220,7 +251,12 @@ function ensureTile(level, x, y, priority = 0) {
   };
   tileCache.set(key, state);
 
-  state.promise = enqueueLoad(async () => {
+  const cancel = () => {
+    state.loading = false;
+    if (tileCache.get(key) === state) tileCache.delete(key);
+  };
+
+  state.promise = enqueueLoad(key, async () => {
     const heightUrl = tileUrl(lodMeta.lod.heightPattern, level, x, y);
     const textureUrl = tileUrl(lodMeta.lod.texturePattern, level, x, y);
     const [heightResponse, loadedTexture] = await Promise.all([
@@ -229,10 +265,20 @@ function ensureTile(level, x, y, priority = 0) {
     ]);
 
     if (!heightResponse.ok) throw new Error(`Unable to load terrain tile ${key}`);
+
+    // Camera motion can make an in-flight request stale. Finish the I/O, but do not
+    // spend CPU/GPU memory constructing geometry that is no longer wanted.
+    if (!isRootKey(key) && !currentWantedKeys.has(key)) {
+      loadedTexture.dispose();
+      cancel();
+      return null;
+    }
+
     const heights = new Float32Array(await heightResponse.arrayBuffer());
     const samples = lodMeta.lod.samples;
     const expected = samples * samples;
     if (heights.length !== expected) {
+      loadedTexture.dispose();
       throw new Error(`Terrain tile ${key} has ${heights.length} samples; expected ${expected}`);
     }
 
@@ -262,7 +308,7 @@ function ensureTile(level, x, y, priority = 0) {
     geometry.computeBoundingSphere();
 
     loadedTexture.colorSpace = THREE.SRGBColorSpace;
-    loadedTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
 
     const material = new THREE.MeshStandardMaterial({
       map: loadedTexture,
@@ -270,6 +316,11 @@ function ensureTile(level, x, y, priority = 0) {
       roughness: 1,
       metalness: 0,
       side: THREE.DoubleSide,
+      // Level 0 is a permanent safety underlay. Bias it slightly away from the
+      // camera so finer tiles can sit directly on top without z-fighting.
+      polygonOffset: level === 0,
+      polygonOffsetFactor: level === 0 ? 1 : 0,
+      polygonOffsetUnits: level === 0 ? 1 : 0,
     });
 
     const mesh = new THREE.Mesh(geometry, material);
@@ -284,9 +335,10 @@ function ensureTile(level, x, y, priority = 0) {
     state.loading = false;
     state.lastUsed = performance.now();
     applyMaterialControls(mesh, loadedTexture);
+    lodDirty = true;
     return state;
-  }, priority).catch((error) => {
-    tileCache.delete(key);
+  }, priority, cancel).catch((error) => {
+    if (tileCache.get(key) === state) tileCache.delete(key);
     throw error;
   });
 
@@ -299,18 +351,26 @@ function updateFrustum() {
   lodFrustum.setFromProjectionMatrix(projectionView);
 }
 
-function tileSphere(level, x, y) {
+function tileIsVisible(level, x, y) {
   const bounds = tileBounds(level, x, y);
   const exaggeration = Number(exaggerationEl.value);
   const relief = (lodMeta.elevation.max - lodMeta.elevation.min) * exaggeration;
-  const center = new THREE.Vector3(bounds.centerX, relief * 0.5, bounds.centerZ);
-  const radius = Math.hypot(bounds.width * 0.5, bounds.depth * 0.5, relief * 0.5);
-  return { bounds, center, radius };
+  sphereScratch.center.set(bounds.centerX, relief * 0.5, bounds.centerZ);
+  sphereScratch.radius = Math.hypot(bounds.width * 0.5, bounds.depth * 0.5, relief * 0.5);
+  return lodFrustum.intersectsSphere(sphereScratch);
 }
 
-function tileIsVisible(level, x, y) {
-  const { center, radius } = tileSphere(level, x, y);
-  return lodFrustum.intersectsSphere(new THREE.Sphere(center, radius));
+function visibleTileKeys(level) {
+  const scale = 2 ** level;
+  const nx = lodMeta.lod.rootTilesX * scale;
+  const ny = lodMeta.lod.rootTilesY * scale;
+  const keys = [];
+  for (let y = 0; y < ny; y++) {
+    for (let x = 0; x < nx; x++) {
+      if (tileIsVisible(level, x, y)) keys.push(tileKey(level, x, y));
+    }
+  }
+  return keys;
 }
 
 function chooseTargetLevel() {
@@ -318,103 +378,64 @@ function chooseTargetLevel() {
   const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
   const distance = Math.max(camera.position.distanceTo(controls.target), 250);
 
+  let desired = lodMeta.lod.maxLevel;
   for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
     const bounds = tileBounds(level, 0, 0);
     const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
     const projectedPixels = spacing * focalPixels / distance;
-    if (projectedPixels <= TARGET_PIXEL_SPACING) return level;
+    if (projectedPixels <= TARGET_PIXEL_SPACING) {
+      desired = level;
+      break;
+    }
   }
-  return lodMeta.lod.maxLevel;
+
+  // Do not select a target level whose visible footprint alone would defeat the
+  // cache budget. Back off one level at a time until the scene is tractable.
+  while (desired > 0) {
+    const keys = visibleTileKeys(desired);
+    if (keys.length <= MAX_TARGET_VISIBLE) return { level: desired, keys };
+    desired -= 1;
+  }
+  return { level: 0, keys: visibleTileKeys(0) };
 }
 
-function visitTarget(level, x, y, targetLevel, selected) {
-  if (!tileIsVisible(level, x, y)) return true;
+function allReady(keys) {
+  return keys.every((key) => tileCache.get(key)?.ready);
+}
 
-  const key = tileKey(level, x, y);
-  const state = tileCache.get(key);
-  if (!state || !state.ready) {
-    ensureTile(level, x, y, 100 - level).catch((error) => {
+function requestKeys(keys, priority) {
+  for (const key of keys) {
+    const { level, x, y } = parseTileKey(key);
+    ensureTile(level, x, y, priority).catch((error) => {
       console.error(error);
       setStatus(error.message, true);
     });
-    return false;
   }
-
-  state.lastUsed = performance.now();
-
-  if (level >= targetLevel) {
-    selected.add(key);
-    return true;
-  }
-
-  const children = [
-    [level + 1, x * 2, y * 2],
-    [level + 1, x * 2 + 1, y * 2],
-    [level + 1, x * 2, y * 2 + 1],
-    [level + 1, x * 2 + 1, y * 2 + 1],
-  ];
-
-  let allReady = true;
-  const childSelections = new Set();
-  for (const [cl, cx, cy] of children) {
-    if (!tileIsVisible(cl, cx, cy)) continue;
-    const childKey = tileKey(cl, cx, cy);
-    const child = tileCache.get(childKey);
-    if (!child || !child.ready) {
-      allReady = false;
-      ensureTile(cl, cx, cy, 100 - cl).catch((error) => {
-        console.error(error);
-        setStatus(error.message, true);
-      });
-      continue;
-    }
-    if (!visitTarget(cl, cx, cy, targetLevel, childSelections)) allReady = false;
-  }
-
-  if (allReady) {
-    for (const childKey of childSelections) selected.add(childKey);
-  } else {
-    selected.add(key);
-  }
-  return true;
 }
 
-function addAncestorsToKeep(selected) {
-  const keep = new Set(selected);
-  for (const key of selected) {
-    const [levelText, xText, yText] = key.split('/');
-    let level = Number(levelText);
-    let x = Number(xText);
-    let y = Number(yText);
-    while (level > 0) {
-      level -= 1;
-      x = Math.floor(x / 2);
-      y = Math.floor(y / 2);
-      keep.add(tileKey(level, x, y));
-    }
-  }
+function rootKeys() {
+  const keys = [];
   for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
-    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) keep.add(tileKey(0, x, y));
+    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) keys.push(tileKey(0, x, y));
   }
-  return keep;
+  return keys;
 }
 
 function disposeTile(state) {
-  if (!state?.ready || !state.mesh) return;
+  if (!state?.ready || !state.mesh || state.level === 0) return;
   terrainGroup.remove(state.mesh);
   state.mesh.geometry.dispose();
   state.texture?.dispose();
   state.mesh.material.dispose();
-  tileCache.delete(state.key);
+  if (tileCache.get(state.key) === state) tileCache.delete(state.key);
 }
 
-function evictTiles(selected) {
-  const keep = addAncestorsToKeep(selected);
+function evictTiles() {
   const ready = [...tileCache.values()].filter((state) => state.ready);
   if (ready.length <= MAX_READY_TILES) return;
 
   const candidates = ready
-    .filter((state) => !keep.has(state.key))
+    .filter((state) => state.level !== 0 && !currentWantedKeys.has(state.key) && !state.mesh.visible)
     .sort((a, b) => a.lastUsed - b.lastUsed);
 
   let readyCount = ready.length;
@@ -425,38 +446,70 @@ function evictTiles(selected) {
   }
 }
 
-function updateStatus(selected, maxSelected) {
+function updateVisibility(renderKeys) {
+  const renderSet = new Set(renderKeys);
+  for (const state of tileCache.values()) {
+    if (!state.ready || !state.mesh) continue;
+
+    // Level 0 is always present as a coarse safety net. It prevents transient
+    // black holes while higher-resolution tiles are streaming during a pan.
+    if (state.level === 0) {
+      state.mesh.visible = true;
+      continue;
+    }
+
+    state.mesh.visible = state.level === currentRenderLevel && renderSet.has(state.key);
+  }
+}
+
+function updateStatus(targetLevel, renderKeys, nextKeys) {
   const readyCount = [...tileCache.values()].filter((state) => state.ready).length;
-  const loadingCount = [...tileCache.values()].filter((state) => state.loading).length;
+  const renderReady = renderKeys.filter((key) => tileCache.get(key)?.ready).length;
+  const shownCount = [...tileCache.values()].filter((state) => state.ready && state.mesh?.visible).length;
   setStatus(
-    `REMA ${RESOLUTION} + LIMA · ${selected.size} visible · ${readyCount} cached` +
-    (loadingCount ? ` · ${loadingCount} queued/loading` : '') +
-    ` · target LOD ${currentTargetLevel}/${lodMeta.lod.maxLevel} · shown ${maxSelected}`,
+    `REMA ${RESOLUTION} + LIMA · target LOD ${targetLevel}/${lodMeta.lod.maxLevel}` +
+    ` · shown ${currentRenderLevel}` +
+    ` · surface ${renderReady}/${renderKeys.length}` +
+    ` · ${shownCount} drawn · ${readyCount} cached` +
+    (activeLoads ? ` · ${activeLoads} active` : '') +
+    (loadQueue.length ? ` · ${loadQueue.length} queued` : '') +
+    (nextKeys.length ? ` · warming LOD ${currentRenderLevel + 1}` : ''),
   );
 }
 
 function updateLOD() {
   if (!lodMeta) return;
   updateFrustum();
-  currentTargetLevel = chooseTargetLevel();
 
-  const selected = new Set();
-  for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
-    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) {
-      visitTarget(0, x, y, currentTargetLevel, selected);
-    }
+  const target = chooseTargetLevel();
+  const targetLevel = target.level;
+
+  // Zooming out is allowed to drop immediately: the permanent root underlay keeps
+  // the scene covered while the new lower level streams. Zooming in advances only
+  // one complete level at a time, so we never expose a patchwork of steady-state LODs.
+  if (currentRenderLevel > targetLevel) currentRenderLevel = targetLevel;
+
+  let renderKeys = visibleTileKeys(currentRenderLevel);
+  let nextLevel = currentRenderLevel < targetLevel ? currentRenderLevel + 1 : null;
+  let nextKeys = nextLevel === null ? [] : visibleTileKeys(nextLevel);
+
+  const roots = rootKeys();
+  currentWantedKeys = new Set([...roots, ...renderKeys, ...nextKeys]);
+  cancelStaleQueuedLoads();
+
+  requestKeys(renderKeys, 300);
+  if (nextKeys.length) requestKeys(nextKeys, 200);
+
+  if (nextLevel !== null && nextKeys.length > 0 && allReady(nextKeys)) {
+    currentRenderLevel = nextLevel;
+    renderKeys = nextKeys;
+    lodDirty = true;
   }
 
-  let maxSelected = 0;
-  for (const state of tileCache.values()) {
-    if (!state.ready) continue;
-    const show = selected.has(state.key);
-    state.mesh.visible = show;
-    if (show) maxSelected = Math.max(maxSelected, state.level);
-  }
-
-  evictTiles(selected);
-  updateStatus(selected, maxSelected);
+  updateVisibility(renderKeys);
+  evictTiles();
+  updateStatus(targetLevel, renderKeys, nextKeys);
+  lodDirty = false;
 }
 
 async function loadLODTerrain(metaResponse) {
@@ -464,11 +517,12 @@ async function loadLODTerrain(metaResponse) {
   lodBase = LOD_META_URL.slice(0, LOD_META_URL.lastIndexOf('/') + 1);
   buildSharedTopology(lodMeta.lod.samples);
 
-  const roots = [];
-  for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
-    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) roots.push(ensureTile(0, x, y, 100));
-  }
-  await Promise.all(roots);
+  const roots = rootKeys();
+  currentWantedKeys = new Set(roots);
+  await Promise.all(roots.map((key) => {
+    const { level, x, y } = parseTileKey(key);
+    return ensureTile(level, x, y, 1000);
+  }));
 
   const spanX = lodMeta.extent.xmax - lodMeta.extent.xmin;
   const spanZ = lodMeta.extent.ymax - lodMeta.extent.ymin;
@@ -482,15 +536,16 @@ async function loadLODTerrain(metaResponse) {
 
   metaEl.innerHTML = [
     `<strong>${lodMeta.name}</strong>`,
-    `REMA ${lodMeta.resolution} · seam-safe adaptive terrain · LOD 0–${lodMeta.lod.maxLevel}`,
+    `REMA ${lodMeta.resolution} · stable adaptive terrain · LOD 0–${lodMeta.lod.maxLevel}`,
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
-    `GPU budget: ${MAX_READY_TILES} cached tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
-    'steady-state rendering uses one target LOD across the visible scene',
+    `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
+    `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
   ].join('<br>');
 
-  updateLOD();
+  currentRenderLevel = 0;
+  lodDirty = true;
 }
 
 async function loadLegacyTerrain() {
@@ -508,6 +563,8 @@ async function loadLegacyTerrain() {
 
   const heights = new Float32Array(await heightResponse.arrayBuffer());
   const expected = meta.width * meta.height;
+  if (heights.length !== expected) throw new Error('Legacy height grid has unexpected size');
+
   let minHeight = Infinity;
   let maxHeight = -Infinity;
   for (const h of heights) {
@@ -555,7 +612,7 @@ async function loadLegacyTerrain() {
   geometry.computeVertexNormals();
 
   loadedTexture.colorSpace = THREE.SRGBColorSpace;
-  loadedTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
   legacyTexture = loadedTexture;
   legacyTerrain = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
     map: loadedTexture,
@@ -567,20 +624,31 @@ async function loadLegacyTerrain() {
   terrainGroup.add(legacyTerrain);
   applyMaterialControls(legacyTerrain, legacyTexture);
   setDefaultCamera(spanX, spanZ, maxHeight - minHeight);
+
+  metaEl.innerHTML = [
+    `<strong>${meta.name}</strong>`,
+    `${meta.width} × ${meta.height} legacy terrain mesh`,
+    `${(spanX / 1000).toFixed(1)} × ${(spanZ / 1000).toFixed(1)} km`,
+    `${minHeight.toFixed(0)}–${maxHeight.toFixed(0)} m source elevation`,
+    '<em>Build LOD assets for higher detail.</em>',
+  ].join('<br>');
   setStatus(`REMA ${RESOLUTION} + LIMA · legacy mesh`);
 }
 
 async function loadTerrain() {
   const lodResponse = await fetch(LOD_META_URL);
-  if (lodResponse.ok) await loadLODTerrain(lodResponse);
-  else await loadLegacyTerrain();
+  if (lodResponse.ok) {
+    await loadLODTerrain(lodResponse);
+  } else {
+    await loadLegacyTerrain();
+  }
 }
 
 exaggerationEl.addEventListener('input', () => {
   const value = Number(exaggerationEl.value);
   exaggerationValueEl.textContent = `${value.toFixed(1)}×`;
   forEachTerrain((mesh) => { mesh.scale.y = value; });
-  updateLOD();
+  lodDirty = true;
 });
 
 textureToggleEl.addEventListener('change', () => {
@@ -593,23 +661,26 @@ wireframeToggleEl.addEventListener('change', () => {
 
 resetViewEl.addEventListener('click', resetView);
 controls.addEventListener('change', () => {
-  if (lodMeta) updateLOD();
+  if (lodMeta) lodDirty = true;
 });
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  if (lodMeta) updateLOD();
+  lodDirty = true;
 });
 
-function animate() {
+function animate(now = 0) {
   controls.update();
-  if (lodMeta && (++lodFrame % 45 === 0)) updateLOD();
+  if (lodMeta && lodDirty && now - lastLodUpdate >= LOD_UPDATE_INTERVAL_MS) {
+    lastLodUpdate = now;
+    updateLOD();
+  }
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
-animate();
+requestAnimationFrame(animate);
 
 loadTerrain().catch((error) => {
   console.error(error);
