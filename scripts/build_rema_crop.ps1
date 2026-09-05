@@ -44,14 +44,47 @@ if (-not $gdalinfo -or -not $gdalbuildvrt -or -not $gdaltranslate) {
   exit 2
 }
 
+$tileProperty = $cfg.sources.rema.tiles.PSObject.Properties[$Resolution]
+if (-not $tileProperty) { throw "No REMA $Resolution tile set is configured for region '$Region'." }
+$tileDefs = @($tileProperty.Value)
+
 $DemDir = Join-Path $RepoRoot "data\raw\rema\$Resolution\dem"
-$dems = Get-ChildItem $DemDir -Filter "*_dem.tif" -File | Sort-Object Name
-if ($dems.Count -lt 2) { throw "Expected at least 2 REMA DEMs in $DemDir; found $($dems.Count)." }
+$dems = @()
+foreach ($tile in $tileDefs) {
+  $expectedName = "{0}_{1}_v{2}_dem.tif" -f $tile.id, $Resolution, $cfg.sources.rema.version
+  $path = Join-Path $DemDir $expectedName
+  if (-not (Test-Path $path)) {
+    throw "Configured REMA DEM is missing: $path`nRun scripts\fetch_rema.ps1 for $Resolution first."
+  }
+  $dems += Get-Item $path
+}
 
 $OutDir = Join-Path $RepoRoot "data\processed\$Region\terrain\$Resolution"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $Vrt = Join-Path $OutDir "${Region}_${Resolution}_mosaic.vrt"
 $Crop = Join-Path $OutDir "${Region}_${Resolution}_dem.tif"
+
+function Get-DemExtent([string]$Path) {
+  $jsonText = (& $gdalinfo -json $Path 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) { throw "gdalinfo failed for $Path" }
+  $info = $jsonText | ConvertFrom-Json
+  $gt = $info.geoTransform
+  if (-not $gt -or $gt.Count -lt 6) { throw "No geotransform reported for $Path" }
+
+  $width = [double]$info.size[0]
+  $height = [double]$info.size[1]
+  $x0 = [double]$gt[0]
+  $y0 = [double]$gt[3]
+  $x1 = $x0 + ($width * [double]$gt[1])
+  $y1 = $y0 + ($height * [double]$gt[5])
+
+  [pscustomobject]@{
+    XMin = [Math]::Min($x0, $x1)
+    XMax = [Math]::Max($x0, $x1)
+    YMin = [Math]::Min($y0, $y1)
+    YMax = [Math]::Max($y0, $y1)
+  }
+}
 
 Write-Host "Open Antarctica - REMA crop build"
 Write-Host "Region:      $($cfg.name)"
@@ -60,10 +93,24 @@ Write-Host "Input DEMs:  $($dems.Count)"
 Write-Host "Output:      $Crop"
 Write-Host ""
 
+$extents = @()
 foreach ($dem in $dems) {
   Write-Host "Validating $($dem.Name) ..."
-  & $gdalinfo $dem.FullName | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "gdalinfo failed for $($dem.FullName)" }
+  $extent = Get-DemExtent $dem.FullName
+  $extents += $extent
+  Write-Host ("  extent x={0:N0}..{1:N0}, y={2:N0}..{3:N0}" -f $extent.XMin,$extent.XMax,$extent.YMin,$extent.YMax)
+}
+
+$mosaicXMin = ($extents | Measure-Object XMin -Minimum).Minimum
+$mosaicXMax = ($extents | Measure-Object XMax -Maximum).Maximum
+$mosaicYMin = ($extents | Measure-Object YMin -Minimum).Minimum
+$mosaicYMax = ($extents | Measure-Object YMax -Maximum).Maximum
+
+Write-Host ("Configured crop x={0:N0}..{1:N0}, y={2:N0}..{3:N0}" -f $xmin,$xmax,$ymin,$ymax)
+Write-Host ("Source union     x={0:N0}..{1:N0}, y={2:N0}..{3:N0}" -f $mosaicXMin,$mosaicXMax,$mosaicYMin,$mosaicYMax)
+
+if ($xmin -lt $mosaicXMin -or $xmax -gt $mosaicXMax -or $ymin -lt $mosaicYMin -or $ymax -gt $mosaicYMax) {
+  throw "Configured region is not contained by the configured REMA source tiles. Refusing to create an all-NoData crop."
 }
 
 Write-Host "Building VRT mosaic ..."
@@ -83,6 +130,13 @@ Write-Host "Cropping to configured EPSG:3031 footprint ..."
 if ($LASTEXITCODE -ne 0) { throw "gdal_translate failed." }
 
 Write-Host ""
+Write-Host "Checking for valid elevation pixels ..."
+$statsText = (& $gdalinfo -stats $Crop 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "gdalinfo -stats failed on output crop." }
+if ($statsText -match 'STATISTICS_VALID_PERCENT=0(?:\.0+)?(?:\s|$)') {
+  throw "Output crop contains 0% valid pixels. Refusing to report success."
+}
+
 Write-Host "Validating output ..."
 & $gdalinfo $Crop
 if ($LASTEXITCODE -ne 0) { throw "gdalinfo failed on output crop." }
