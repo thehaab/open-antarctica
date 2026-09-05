@@ -46,8 +46,22 @@ fi
 
 OUT="$ROOT/data/processed/$REGION/viewer/$RESOLUTION"
 TILES="$OUT/tiles"
+WORK="$OUT/_lod_work"
 META="$OUT/terrain-lod.json"
-mkdir -p "$TILES"
+mkdir -p "$TILES" "$WORK"
+
+# v1 sampled every tile independently. Even though neighboring tiles described the
+# same geographic edge, their outer raster pixels represented different pixel-center
+# locations, which could leave visible cracks. v2 first builds one shared height grid
+# per LOD and then cuts overlapping 257x257 windows from it. Adjacent tiles therefore
+# contain byte-identical shared edge rows/columns.
+if [[ -f "$META" ]]; then
+  EXISTING_FORMAT="$(jq -r '.format // ""' "$META" 2>/dev/null || true)"
+  if [[ "$EXISTING_FORMAT" != "open-antarctica-lod-v2" ]]; then
+    echo "Legacy LOD assets detected; forcing seam-safe v2 rebuild."
+    FORCE=1
+  fi
+fi
 
 INFO="$(gdalinfo -json "$DEM")"
 SOURCE_WIDTH="$(jq -r '.size[0]' <<<"$INFO")"
@@ -87,6 +101,7 @@ echo "LOD levels:     0..${MAX_LEVEL}"
 echo "Root grid:      ${ROOT_TILES_X} x ${ROOT_TILES_Y}"
 echo "Tile samples:   ${TILE_SAMPLES} x ${TILE_SAMPLES}"
 echo "Tile texture:   ${TEXTURE_SIZE} x ${TEXTURE_SIZE}"
+echo "Seam strategy:  shared level grid + overlapping edge samples"
 echo "Total tiles:    $TOTAL"
 echo
 
@@ -95,7 +110,26 @@ for ((level=0; level<LEVELS; level++)); do
   scale=$((1 << level))
   nx=$((ROOT_TILES_X * scale))
   ny=$((ROOT_TILES_Y * scale))
-  echo "Level $level: ${nx} x ${ny} tiles"
+  grid_width=$((nx * (TILE_SAMPLES - 1) + 1))
+  grid_height=$((ny * (TILE_SAMPLES - 1) + 1))
+  shared_height="$WORK/l${level}_height.bin"
+  shared_hdr="$WORK/l${level}_height.hdr"
+
+  echo "Level $level: ${nx} x ${ny} tiles; shared grid ${grid_width} x ${grid_height}"
+
+  if [[ "$FORCE" == "1" || ! -f "$shared_height" ]]; then
+    rm -f "$shared_height" "$shared_hdr" "$shared_height.aux.xml"
+    gdal_translate -q \
+      -of ENVI -ot Float32 -r bilinear \
+      -outsize "$grid_width" "$grid_height" \
+      "$DEM" "$shared_height"
+
+    BYTE_ORDER="$(grep -E '^byte order' "$shared_hdr" | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}' || true)"
+    if [[ -n "$BYTE_ORDER" && "$BYTE_ORDER" != "0" ]]; then
+      echo "Unexpected ENVI byte order $BYTE_ORDER for $shared_height" >&2
+      exit 3
+    fi
+  fi
 
   for ((ty=0; ty<ny; ty++)); do
     for ((tx=0; tx<nx; tx++)); do
@@ -111,13 +145,13 @@ for ((level=0; level<LEVELS; level++)); do
       tymin="$(awk -v a="$YMAX" -v s="$SPAN_Y" -v y="$ty" -v n="$ny" 'BEGIN{printf "%.12f",a-s*(y+1)/n}')"
 
       if [[ "$FORCE" == "1" || ! -f "$height" ]]; then
+        src_x=$((tx * (TILE_SAMPLES - 1)))
+        src_y=$((ty * (TILE_SAMPLES - 1)))
         rm -f "$height" "$hdr" "$height.aux.xml"
         gdal_translate -q \
-          -of ENVI -ot Float32 -r bilinear \
-          -projwin "$txmin" "$tymax" "$txmax" "$tymin" \
-          -projwin_srs EPSG:3031 \
-          -outsize "$TILE_SAMPLES" "$TILE_SAMPLES" \
-          "$DEM" "$height"
+          -of ENVI -ot Float32 \
+          -srcwin "$src_x" "$src_y" "$TILE_SAMPLES" "$TILE_SAMPLES" \
+          "$shared_height" "$height"
 
         BYTE_ORDER="$(grep -E '^byte order' "$hdr" | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}' || true)"
         if [[ -n "$BYTE_ORDER" && "$BYTE_ORDER" != "0" ]]; then
@@ -169,7 +203,7 @@ jq -n \
   --argjson samples "$TILE_SAMPLES" \
   --argjson textureSize "$TEXTURE_SIZE" \
   '{
-    format: "open-antarctica-lod-v1",
+    format: "open-antarctica-lod-v2",
     region: $region,
     name: $name,
     resolution: $resolution,
@@ -185,7 +219,8 @@ jq -n \
       samples:$samples,
       textureSize:$textureSize,
       heightPattern:"tiles/l{level}/{x}_{y}/height.bin",
-      texturePattern:"tiles/l{level}/{x}_{y}/texture.jpg"
+      texturePattern:"tiles/l{level}/{x}_{y}/texture.jpg",
+      seamStrategy:"shared-level-grid"
     },
     sources: {
       terrain:"PGC REMA v2",
