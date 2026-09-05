@@ -40,13 +40,13 @@
           {
             "id": "18_34_1_2",
             "archive": "18_34_1_2_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/2.0/2m/18_34/18_34_1_2_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/18_34/18_34_1_2_2m_v2.0.tar.gz",
             "valid_fraction": 0.87723211
           },
           {
             "id": "18_35_1_1",
             "archive": "18_35_1_1_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/2.0/2m/18_35/18_35_1_1_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/18_35/18_35_1_1_2m_v2.0.tar.gz",
             "valid_fraction": 1.0
           }
         ]
