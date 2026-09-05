@@ -65,10 +65,10 @@ python scripts/fetch_rema.py --region ferrar-glacier --resolution 10m
 
 Later, acquire the 2 m terrain by changing the resolution to `2m`.
 
-Downloads are stored under:
+Downloaded archives are stored under:
 
 ```text
-data/raw/rema/<resolution>/archives/
+data/raw/rema/<resolution>/
 ```
 
 and the primary `*_dem.tif` files are extracted under:
