@@ -25,26 +25,26 @@
       "tiles": {
         "10m": [
           {
-            "id": "44_28",
-            "archive": "44_28_10m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/44_28/44_28_10m_v2.0.tar.gz"
+            "id": "28_44",
+            "archive": "28_44_10m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/28_44/28_44_10m_v2.0.tar.gz"
           },
           {
-            "id": "45_28",
-            "archive": "45_28_10m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/45_28/45_28_10m_v2.0.tar.gz"
+            "id": "28_45",
+            "archive": "28_45_10m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/10m/28_45/28_45_10m_v2.0.tar.gz"
           }
         ],
         "2m": [
           {
-            "id": "44_28_1_2",
-            "archive": "44_28_1_2_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/44_28/44_28_1_2_2m_v2.0.tar.gz"
+            "id": "28_44_1_2",
+            "archive": "28_44_1_2_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/28_44/28_44_1_2_2m_v2.0.tar.gz"
           },
           {
-            "id": "45_28_1_1",
-            "archive": "45_28_1_1_2m_v2.0.tar.gz",
-            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/45_28/45_28_1_1_2m_v2.0.tar.gz"
+            "id": "28_45_1_1",
+            "archive": "28_45_1_1_2m_v2.0.tar.gz",
+            "url": "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic/v2.0/2m/28_45/28_45_1_1_2m_v2.0.tar.gz"
           }
         ]
       }
