@@ -51,6 +51,22 @@
           }
         ]
       }
+    },
+    "lima": {
+      "name": "USGS Landsat Image Mosaic of Antarctica",
+      "product": "Natural-color pan-sharpened LIMA, RGB 1X stretch",
+      "crs": "EPSG:3031",
+      "nominal_resolution_m": 15,
+      "wms_version": "1.1.1",
+      "wms_url": "https://nimbus.cr.usgs.gov/arcgis/services/Antarctica/USGS_EROS_Antarctica_LANDSAT/MapServer/WMSServer",
+      "layers": [
+        "LANDSAT_15M_RGB_1X_01",
+        "LANDSAT_15M_RGB_1X_02",
+        "LANDSAT_15M_RGB_1X_04",
+        "LANDSAT_15M_RGB_1X_03",
+        "LANDSAT_15M_RGB_1X_05",
+        "LANDSAT_15M_RGB_1X_06"
+      ]
     }
   }
 }
