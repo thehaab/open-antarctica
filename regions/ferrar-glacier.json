@@ -1,0 +1,21 @@
+{
+  "id": "ferrar-glacier",
+  "name": "Ferrar Glacier",
+  "description": "Initial Open Antarctica prototype region derived from the LIMA WMS footprint selected during exploration.",
+  "crs": "EPSG:3031",
+  "bbox": [
+    369585.9375,
+    -1276268.2255506516,
+    430625.0,
+    -1258494.7880506516
+  ],
+  "approx_center": {
+    "latitude": -77.8123,
+    "longitude": 162.4794
+  },
+  "target_products": {
+    "terrain_prototype": "REMA 10 m",
+    "terrain_final_v0_0_1": "REMA 2 m",
+    "imagery": "USGS LIMA 15 m natural color"
+  }
+}
