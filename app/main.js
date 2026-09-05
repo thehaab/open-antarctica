@@ -266,8 +266,6 @@ function ensureTile(level, x, y, priority = 0) {
 
     if (!heightResponse.ok) throw new Error(`Unable to load terrain tile ${key}`);
 
-    // Camera motion can make an in-flight request stale. Finish the I/O, but do not
-    // spend CPU/GPU memory constructing geometry that is no longer wanted.
     if (!isRootKey(key) && !currentWantedKeys.has(key)) {
       loadedTexture.dispose();
       cancel();
@@ -316,8 +314,6 @@ function ensureTile(level, x, y, priority = 0) {
       roughness: 1,
       metalness: 0,
       side: THREE.DoubleSide,
-      // Level 0 is a permanent safety underlay. Bias it slightly away from the
-      // camera so finer tiles can sit directly on top without z-fighting.
       polygonOffset: level === 0,
       polygonOffsetFactor: level === 0 ? 1 : 0,
       polygonOffsetUnits: level === 0 ? 1 : 0,
@@ -389,8 +385,6 @@ function chooseTargetLevel() {
     }
   }
 
-  // Do not select a target level whose visible footprint alone would defeat the
-  // cache budget. Back off one level at a time until the scene is tractable.
   while (desired > 0) {
     const keys = visibleTileKeys(desired);
     if (keys.length <= MAX_TARGET_VISIBLE) return { level: desired, keys };
@@ -451,8 +445,6 @@ function updateVisibility(renderKeys) {
   for (const state of tileCache.values()) {
     if (!state.ready || !state.mesh) continue;
 
-    // Level 0 is always present as a coarse safety net. It prevents transient
-    // black holes while higher-resolution tiles are streaming during a pan.
     if (state.level === 0) {
       state.mesh.visible = true;
       continue;
@@ -473,7 +465,7 @@ function updateStatus(targetLevel, renderKeys, nextKeys) {
     ` · ${shownCount} drawn · ${readyCount} cached` +
     (activeLoads ? ` · ${activeLoads} active` : '') +
     (loadQueue.length ? ` · ${loadQueue.length} queued` : '') +
-    (nextKeys.length ? ` · warming LOD ${currentRenderLevel + 1}` : ''),
+    (nextKeys.length ? ` · warming LOD ${Math.min(currentRenderLevel + 1, lodMeta.lod.maxLevel)}` : ''),
   );
 }
 
@@ -484,9 +476,6 @@ function updateLOD() {
   const target = chooseTargetLevel();
   const targetLevel = target.level;
 
-  // Zooming out is allowed to drop immediately: the permanent root underlay keeps
-  // the scene covered while the new lower level streams. Zooming in advances only
-  // one complete level at a time, so we never expose a patchwork of steady-state LODs.
   if (currentRenderLevel > targetLevel) currentRenderLevel = targetLevel;
 
   let renderKeys = visibleTileKeys(currentRenderLevel);
@@ -500,16 +489,20 @@ function updateLOD() {
   requestKeys(renderKeys, 300);
   if (nextKeys.length) requestKeys(nextKeys, 200);
 
+  let advanced = false;
   if (nextLevel !== null && nextKeys.length > 0 && allReady(nextKeys)) {
     currentRenderLevel = nextLevel;
     renderKeys = nextKeys;
-    lodDirty = true;
+    advanced = true;
   }
 
   updateVisibility(renderKeys);
   evictTiles();
   updateStatus(targetLevel, renderKeys, nextKeys);
-  lodDirty = false;
+
+  // If a whole level just became ready, immediately schedule the next refinement
+  // pass instead of waiting for another camera movement to wake the LOD manager.
+  lodDirty = advanced && currentRenderLevel < targetLevel;
 }
 
 async function loadLODTerrain(metaResponse) {
