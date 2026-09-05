@@ -5,6 +5,11 @@ Queries the Polar Geospatial Center's authoritative REMA v2 tile index feature
 service using the region's EPSG:3031 bounding box. This deliberately avoids
 hand-derived REMA tile IDs.
 
+The ArcGIS index is authoritative for tile geometry/IDs, but its historical
+``fileurl`` field may contain an obsolete ``/mosaic/2.0/`` path. For downloads
+we therefore derive the canonical current PGC HTTP URL from the authoritative
+release, supertile, and DEM ID using PGC's documented ``/mosaic/vX.Y/`` layout.
+
 Uses only the Python standard library.
 """
 
@@ -22,6 +27,7 @@ SERVICE = (
     "https://services.arcgis.com/8df8p0NlLFEShl0r/ArcGIS/rest/services/"
     "PGC_REMA_v2_Tile_Index/FeatureServer/0/query"
 )
+PGC_HTTP_ROOT = "https://data.pgc.umn.edu/elev/dem/setsm/REMA/mosaic"
 USER_AGENT = "OpenAntarctica/0.0.1 (+https://github.com/thehaab/open-antarctica)"
 
 
@@ -79,9 +85,37 @@ def query_index(bbox: list[float]) -> dict:
     return payload
 
 
+def canonical_pgc_url(attrs: dict) -> str | None:
+    """Build the current PGC HTTP archive URL from authoritative index fields."""
+    dem_id = attrs.get("dem_id")
+    supertile = attrs.get("supertile")
+    release = attrs.get("release_ver")
+    gsd = attrs.get("gsd")
+    if not dem_id or not supertile or release is None or gsd is None:
+        return None
+
+    release_text = str(release)
+    if not release_text.startswith("v"):
+        release_text = "v" + release_text
+
+    try:
+        gsd_text = f"{int(float(gsd))}m"
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        f"{PGC_HTTP_ROOT}/{release_text}/{gsd_text}/{supertile}/"
+        f"{dem_id}.tar.gz"
+    )
+
+
 def clean_feature(feature: dict) -> dict:
     attrs = dict(feature.get("attributes") or {})
-    return {k: v for k, v in attrs.items() if v is not None}
+    attrs = {k: v for k, v in attrs.items() if v is not None}
+    canonical = canonical_pgc_url(attrs)
+    if canonical:
+        attrs["canonical_fileurl"] = canonical
+    return attrs
 
 
 def main() -> int:
@@ -147,8 +181,11 @@ def main() -> int:
             f"    gsd={attrs.get('gsd')}  epsg={attrs.get('epsg')}  "
             f"release={attrs.get('release_ver')}  valid={attrs.get('data_percent')}"
         )
-        if attrs.get("fileurl"):
-            print(f"    fileurl={attrs['fileurl']}")
+        if attrs.get("canonical_fileurl"):
+            print(f"    pgc_http={attrs['canonical_fileurl']}")
+        raw_url = attrs.get("fileurl")
+        if raw_url and raw_url != attrs.get("canonical_fileurl"):
+            print(f"    index_fileurl={raw_url}  [index field may be stale]")
         if attrs.get("s3url"):
             print(f"    s3url={attrs['s3url']}")
         print()
@@ -162,6 +199,7 @@ def main() -> int:
 
     print()
     print("Source: PGC REMA v2 Tile Index feature service (EPSG:3031).")
+    print("Download URLs: canonical PGC HTTP mosaic layout derived from index fields.")
     return 0
 
 
