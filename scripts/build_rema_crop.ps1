@@ -22,6 +22,14 @@ function Find-GdalExe([string]$Name) {
   return $null
 }
 
+function Parse-InvariantDouble([string]$Value) {
+  return [double]::Parse(
+    $Value,
+    [System.Globalization.NumberStyles]::Float,
+    [System.Globalization.CultureInfo]::InvariantCulture
+  )
+}
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $RegionPath = Join-Path $RepoRoot "regions\$Region.json"
 if (-not (Test-Path $RegionPath)) { throw "Region definition not found: $RegionPath" }
@@ -65,24 +73,47 @@ $Vrt = Join-Path $OutDir "${Region}_${Resolution}_mosaic.vrt"
 $Crop = Join-Path $OutDir "${Region}_${Resolution}_dem.tif"
 
 function Get-DemExtent([string]$Path) {
-  $jsonText = (& $gdalinfo -json $Path 2>&1 | Out-String)
+  # Do not use gdalinfo -json here. Windows PowerShell 5.1 ConvertFrom-Json can
+  # reject otherwise-valid GDAL JSON when metadata contains property names that
+  # collide case-insensitively. The stable text header gives us everything
+  # needed for a north-up raster extent check.
+  $text = (& $gdalinfo $Path 2>&1 | Out-String)
   if ($LASTEXITCODE -ne 0) { throw "gdalinfo failed for $Path" }
-  $info = $jsonText | ConvertFrom-Json
-  $gt = $info.geoTransform
-  if (-not $gt -or $gt.Count -lt 6) { throw "No geotransform reported for $Path" }
 
-  $width = [double]$info.size[0]
-  $height = [double]$info.size[1]
-  $x0 = [double]$gt[0]
-  $y0 = [double]$gt[3]
-  $x1 = $x0 + ($width * [double]$gt[1])
-  $y1 = $y0 + ($height * [double]$gt[5])
+  if ($text -notmatch '(?m)^Size is\s+(\d+),\s*(\d+)\s*$') {
+    throw "Could not parse raster size from gdalinfo output for $Path"
+  }
+  $width = [double]$Matches[1]
+  $height = [double]$Matches[2]
+
+  if ($text -notmatch '(?m)^Origin\s*=\s*\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*$') {
+    throw "Could not parse raster origin from gdalinfo output for $Path"
+  }
+  $x0 = Parse-InvariantDouble $Matches[1]
+  $y0 = Parse-InvariantDouble $Matches[2]
+
+  if ($text -notmatch '(?m)^Pixel Size\s*=\s*\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*$') {
+    throw "Could not parse pixel size from gdalinfo output for $Path"
+  }
+  $pixelX = Parse-InvariantDouble $Matches[1]
+  $pixelY = Parse-InvariantDouble $Matches[2]
+
+  if ($pixelX -eq 0 -or $pixelY -eq 0) {
+    throw "Invalid zero pixel size reported for $Path"
+  }
+
+  $x1 = $x0 + ($width * $pixelX)
+  $y1 = $y0 + ($height * $pixelY)
 
   [pscustomobject]@{
     XMin = [Math]::Min($x0, $x1)
     XMax = [Math]::Max($x0, $x1)
     YMin = [Math]::Min($y0, $y1)
     YMax = [Math]::Max($y0, $y1)
+    PixelX = $pixelX
+    PixelY = $pixelY
+    Width = $width
+    Height = $height
   }
 }
 
@@ -98,7 +129,7 @@ foreach ($dem in $dems) {
   Write-Host "Validating $($dem.Name) ..."
   $extent = Get-DemExtent $dem.FullName
   $extents += $extent
-  Write-Host ("  extent x={0:N0}..{1:N0}, y={2:N0}..{3:N0}" -f $extent.XMin,$extent.XMax,$extent.YMin,$extent.YMax)
+  Write-Host ("  extent x={0:N0}..{1:N0}, y={2:N0}..{3:N0}; pixel={4} x {5} m" -f $extent.XMin,$extent.XMax,$extent.YMin,$extent.YMax,$extent.PixelX,$extent.PixelY)
 }
 
 $mosaicXMin = ($extents | Measure-Object XMin -Minimum).Minimum
@@ -116,6 +147,10 @@ if ($xmin -lt $mosaicXMin -or $xmax -gt $mosaicXMax -or $ymin -lt $mosaicYMin -o
 Write-Host "Building VRT mosaic ..."
 & $gdalbuildvrt -overwrite $Vrt @($dems.FullName)
 if ($LASTEXITCODE -ne 0) { throw "gdalbuildvrt failed." }
+
+# Remove an earlier failed/invalid crop so gdal_translate always writes a fresh file.
+if (Test-Path $Crop) { Remove-Item -Force $Crop }
+if (Test-Path "$Crop.aux.xml") { Remove-Item -Force "$Crop.aux.xml" }
 
 Write-Host "Cropping to configured EPSG:3031 footprint ..."
 # gdal_translate preserves the native REMA grid and crops to the nearest source pixels.
@@ -136,6 +171,11 @@ if ($LASTEXITCODE -ne 0) { throw "gdalinfo -stats failed on output crop." }
 if ($statsText -match 'STATISTICS_VALID_PERCENT=0(?:\.0+)?(?:\s|$)') {
   throw "Output crop contains 0% valid pixels. Refusing to report success."
 }
+if ($statsText -notmatch 'STATISTICS_VALID_PERCENT=([-+0-9.eE]+)') {
+  throw "Could not confirm valid-pixel percentage on output crop."
+}
+$validPercent = Parse-InvariantDouble $Matches[1]
+Write-Host ("  valid pixels: {0:N2}%" -f $validPercent)
 
 Write-Host "Validating output ..."
 & $gdalinfo $Crop
