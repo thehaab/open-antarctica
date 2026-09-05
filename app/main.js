@@ -51,8 +51,7 @@ const projectionView = new THREE.Matrix4();
 
 const MAX_CONCURRENT_LOADS = 6;
 const MAX_READY_TILES = RESOLUTION === '2m' ? 72 : 96;
-const LOD_PIXEL_THRESHOLD = RESOLUTION === '2m' ? 1.35 : 1.6;
-const SKIRT_DEPTH_METERS = RESOLUTION === '2m' ? 24 : 40;
+const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
 
 let activeLoads = 0;
 let lodMeta = null;
@@ -64,8 +63,7 @@ let legacyTerrain = null;
 let legacyTexture = null;
 let lodFrame = 0;
 let lastStatus = '';
-let lastSelected = new Set();
-let lastMaxSelected = 0;
+let currentTargetLevel = 0;
 
 function setStatus(text, error = false) {
   if (text === lastStatus && !error) return;
@@ -200,66 +198,6 @@ function pumpLoadQueue() {
   }
 }
 
-function buildSkirtGeometry(positions, samples, depth) {
-  const edge = [];
-  for (let col = 0; col < samples; col++) edge.push(col);
-  for (let row = 1; row < samples; row++) edge.push(row * samples + (samples - 1));
-  for (let col = samples - 2; col >= 0; col--) edge.push((samples - 1) * samples + col);
-  for (let row = samples - 2; row > 0; row--) edge.push(row * samples);
-
-  const count = edge.length;
-  const skirtPositions = new Float32Array(count * 2 * 3);
-  const skirtUVs = new Float32Array(count * 2 * 2);
-  const skirtIndices = new Uint32Array(count * 6);
-
-  for (let i = 0; i < count; i++) {
-    const sourceIndex = edge[i];
-    const row = Math.floor(sourceIndex / samples);
-    const col = sourceIndex % samples;
-    const sourceOffset = sourceIndex * 3;
-    const upperOffset = i * 6;
-    const uvOffset = i * 4;
-    const x = positions[sourceOffset];
-    const y = positions[sourceOffset + 1];
-    const z = positions[sourceOffset + 2];
-    const u = col / (samples - 1);
-    const v = 1 - row / (samples - 1);
-
-    skirtPositions[upperOffset] = x;
-    skirtPositions[upperOffset + 1] = y;
-    skirtPositions[upperOffset + 2] = z;
-    skirtPositions[upperOffset + 3] = x;
-    skirtPositions[upperOffset + 4] = y - depth;
-    skirtPositions[upperOffset + 5] = z;
-
-    skirtUVs[uvOffset] = u;
-    skirtUVs[uvOffset + 1] = v;
-    skirtUVs[uvOffset + 2] = u;
-    skirtUVs[uvOffset + 3] = v;
-
-    const next = (i + 1) % count;
-    const a = i * 2;
-    const b = a + 1;
-    const c = next * 2;
-    const d = c + 1;
-    const k = i * 6;
-    skirtIndices[k] = a;
-    skirtIndices[k + 1] = b;
-    skirtIndices[k + 2] = c;
-    skirtIndices[k + 3] = c;
-    skirtIndices[k + 4] = b;
-    skirtIndices[k + 5] = d;
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(skirtPositions, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(skirtUVs, 2));
-  geometry.setIndex(new THREE.BufferAttribute(skirtIndices, 1));
-  geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
 function ensureTile(level, x, y, priority = 0) {
   const key = tileKey(level, x, y);
   const existing = tileCache.get(key);
@@ -291,8 +229,7 @@ function ensureTile(level, x, y, priority = 0) {
     ]);
 
     if (!heightResponse.ok) throw new Error(`Unable to load terrain tile ${key}`);
-    const buffer = await heightResponse.arrayBuffer();
-    const heights = new Float32Array(buffer);
+    const heights = new Float32Array(await heightResponse.arrayBuffer());
     const samples = lodMeta.lod.samples;
     const expected = samples * samples;
     if (heights.length !== expected) {
@@ -309,8 +246,7 @@ function ensureTile(level, x, y, priority = 0) {
       const z = (v - 0.5) * bounds.depth;
       for (let col = 0; col < samples; col++) {
         const u = col / (samples - 1);
-        const i = row * samples + col;
-        const raw = heights[i];
+        const raw = heights[row * samples + col];
         const yValue = !Number.isFinite(raw) || raw <= -9000 ? 0 : raw - minHeight;
         positions[p++] = (u - 0.5) * bounds.width;
         positions[p++] = yValue;
@@ -340,13 +276,6 @@ function ensureTile(level, x, y, priority = 0) {
     mesh.position.set(bounds.centerX, 0, bounds.centerZ);
     mesh.visible = false;
     mesh.userData.tileKey = key;
-
-    const sampleSpacing = Math.max(bounds.width, bounds.depth) / (samples - 1);
-    const skirtDepth = Math.max(SKIRT_DEPTH_METERS, sampleSpacing * 3);
-    const skirt = new THREE.Mesh(buildSkirtGeometry(positions, samples, skirtDepth), material);
-    skirt.userData.isTerrainSkirt = true;
-    mesh.add(skirt);
-
     terrainGroup.add(mesh);
 
     state.mesh = mesh;
@@ -384,26 +313,27 @@ function tileIsVisible(level, x, y) {
   return lodFrustum.intersectsSphere(new THREE.Sphere(center, radius));
 }
 
-function shouldRefine(level, x, y) {
-  if (level >= lodMeta.lod.maxLevel) return false;
-  const { bounds, center, radius } = tileSphere(level, x, y);
-  const samples = lodMeta.lod.samples;
-  const sampleSpacing = Math.max(bounds.width, bounds.depth) / (samples - 1);
-  const centerDistance = camera.position.distanceTo(center);
-  const surfaceDistance = Math.max(centerDistance - radius, sampleSpacing * 4);
+function chooseTargetLevel() {
   const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
   const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
-  const projectedSamplePixels = sampleSpacing * focalPixels / surfaceDistance;
-  return projectedSamplePixels > LOD_PIXEL_THRESHOLD;
+  const distance = Math.max(camera.position.distanceTo(controls.target), 250);
+
+  for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
+    const bounds = tileBounds(level, 0, 0);
+    const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
+    const projectedPixels = spacing * focalPixels / distance;
+    if (projectedPixels <= TARGET_PIXEL_SPACING) return level;
+  }
+  return lodMeta.lod.maxLevel;
 }
 
-function visitTile(level, x, y, selected) {
-  if (!tileIsVisible(level, x, y)) return false;
+function visitTarget(level, x, y, targetLevel, selected) {
+  if (!tileIsVisible(level, x, y)) return true;
 
   const key = tileKey(level, x, y);
   const state = tileCache.get(key);
   if (!state || !state.ready) {
-    ensureTile(level, x, y, level).catch((error) => {
+    ensureTile(level, x, y, 100 - level).catch((error) => {
       console.error(error);
       setStatus(error.message, true);
     });
@@ -412,34 +342,40 @@ function visitTile(level, x, y, selected) {
 
   state.lastUsed = performance.now();
 
-  if (shouldRefine(level, x, y)) {
-    const children = [
-      [level + 1, x * 2, y * 2],
-      [level + 1, x * 2 + 1, y * 2],
-      [level + 1, x * 2, y * 2 + 1],
-      [level + 1, x * 2 + 1, y * 2 + 1],
-    ];
-
-    let allReady = true;
-    for (const [cl, cx, cy] of children) {
-      const childKey = tileKey(cl, cx, cy);
-      const child = tileCache.get(childKey);
-      if (!child || !child.ready) {
-        allReady = false;
-        ensureTile(cl, cx, cy, cl).catch((error) => {
-          console.error(error);
-          setStatus(error.message, true);
-        });
-      }
-    }
-
-    if (allReady) {
-      for (const [cl, cx, cy] of children) visitTile(cl, cx, cy, selected);
-      return true;
-    }
+  if (level >= targetLevel) {
+    selected.add(key);
+    return true;
   }
 
-  selected.add(key);
+  const children = [
+    [level + 1, x * 2, y * 2],
+    [level + 1, x * 2 + 1, y * 2],
+    [level + 1, x * 2, y * 2 + 1],
+    [level + 1, x * 2 + 1, y * 2 + 1],
+  ];
+
+  let allReady = true;
+  const childSelections = new Set();
+  for (const [cl, cx, cy] of children) {
+    if (!tileIsVisible(cl, cx, cy)) continue;
+    const childKey = tileKey(cl, cx, cy);
+    const child = tileCache.get(childKey);
+    if (!child || !child.ready) {
+      allReady = false;
+      ensureTile(cl, cx, cy, 100 - cl).catch((error) => {
+        console.error(error);
+        setStatus(error.message, true);
+      });
+      continue;
+    }
+    if (!visitTarget(cl, cx, cy, targetLevel, childSelections)) allReady = false;
+  }
+
+  if (allReady) {
+    for (const childKey of childSelections) selected.add(childKey);
+  } else {
+    selected.add(key);
+  }
   return true;
 }
 
@@ -466,9 +402,6 @@ function addAncestorsToKeep(selected) {
 function disposeTile(state) {
   if (!state?.ready || !state.mesh) return;
   terrainGroup.remove(state.mesh);
-  for (const child of state.mesh.children) {
-    if (child.geometry) child.geometry.dispose();
-  }
   state.mesh.geometry.dispose();
   state.texture?.dispose();
   state.mesh.material.dispose();
@@ -497,19 +430,20 @@ function updateStatus(selected, maxSelected) {
   const loadingCount = [...tileCache.values()].filter((state) => state.loading).length;
   setStatus(
     `REMA ${RESOLUTION} + LIMA · ${selected.size} visible · ${readyCount} cached` +
-    (loadingCount ? ` · ${loadingCount} loading` : '') +
-    ` · adaptive LOD ${maxSelected}/${lodMeta.lod.maxLevel}`,
+    (loadingCount ? ` · ${loadingCount} queued/loading` : '') +
+    ` · target LOD ${currentTargetLevel}/${lodMeta.lod.maxLevel} · shown ${maxSelected}`,
   );
 }
 
 function updateLOD() {
   if (!lodMeta) return;
   updateFrustum();
+  currentTargetLevel = chooseTargetLevel();
 
   const selected = new Set();
   for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
     for (let x = 0; x < lodMeta.lod.rootTilesX; x++) {
-      visitTile(0, x, y, selected);
+      visitTarget(0, x, y, currentTargetLevel, selected);
     }
   }
 
@@ -521,8 +455,6 @@ function updateLOD() {
     if (show) maxSelected = Math.max(maxSelected, state.level);
   }
 
-  lastSelected = selected;
-  lastMaxSelected = maxSelected;
   evictTiles(selected);
   updateStatus(selected, maxSelected);
 }
@@ -550,12 +482,12 @@ async function loadLODTerrain(metaResponse) {
 
   metaEl.innerHTML = [
     `<strong>${lodMeta.name}</strong>`,
-    `REMA ${lodMeta.resolution} · adaptive tiled terrain · LOD 0–${lodMeta.lod.maxLevel}`,
+    `REMA ${lodMeta.resolution} · seam-safe adaptive terrain · LOD 0–${lodMeta.lod.maxLevel}`,
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
     `GPU budget: ${MAX_READY_TILES} cached tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
-    'mixed LOD seams hidden with terrain skirts',
+    'steady-state rendering uses one target LOD across the visible scene',
   ].join('<br>');
 
   updateLOD();
@@ -576,8 +508,6 @@ async function loadLegacyTerrain() {
 
   const heights = new Float32Array(await heightResponse.arrayBuffer());
   const expected = meta.width * meta.height;
-  if (heights.length !== expected) throw new Error('Legacy height grid has unexpected size');
-
   let minHeight = Infinity;
   let maxHeight = -Infinity;
   for (const h of heights) {
@@ -637,24 +567,13 @@ async function loadLegacyTerrain() {
   terrainGroup.add(legacyTerrain);
   applyMaterialControls(legacyTerrain, legacyTexture);
   setDefaultCamera(spanX, spanZ, maxHeight - minHeight);
-
-  metaEl.innerHTML = [
-    `<strong>${meta.name}</strong>`,
-    `${meta.width} × ${meta.height} legacy terrain mesh`,
-    `${(spanX / 1000).toFixed(1)} × ${(spanZ / 1000).toFixed(1)} km`,
-    `${minHeight.toFixed(0)}–${maxHeight.toFixed(0)} m source elevation`,
-    '<em>Build LOD assets for higher detail.</em>',
-  ].join('<br>');
   setStatus(`REMA ${RESOLUTION} + LIMA · legacy mesh`);
 }
 
 async function loadTerrain() {
   const lodResponse = await fetch(LOD_META_URL);
-  if (lodResponse.ok) {
-    await loadLODTerrain(lodResponse);
-  } else {
-    await loadLegacyTerrain();
-  }
+  if (lodResponse.ok) await loadLODTerrain(lodResponse);
+  else await loadLegacyTerrain();
 }
 
 exaggerationEl.addEventListener('input', () => {
