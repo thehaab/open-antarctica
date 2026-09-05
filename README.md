@@ -42,6 +42,18 @@ Approximate center:
 
 See [`regions/ferrar-glacier.json`](regions/ferrar-glacier.json).
 
+## First terrain acquisition
+
+The exact Ferrar footprint intersects REMA v2 parent tiles `44_28` and `45_28`. The 2 m footprint only needs subtiles `44_28_1_2` and `45_28_1_1`.
+
+Start with the 10 m prototype terrain:
+
+```bash
+python scripts/fetch_rema.py --region ferrar-glacier --resolution 10m
+```
+
+See [`docs/REMA_ACQUISITION.md`](docs/REMA_ACQUISITION.md) for the source selection and acquisition workflow.
+
 ## Project structure
 
 ```text
@@ -67,6 +79,6 @@ Local data belongs under `data/`, which is ignored except for its README.
 
 ## License
 
-Project code is intended to be licensed under the Apache License 2.0.
+Code in this repository is licensed under the Apache License 2.0.
 
 Source datasets retain their own licenses and attribution requirements. See [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md) and [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md).
