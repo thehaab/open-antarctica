@@ -36,13 +36,10 @@ done
 
 NAME="$(jq -r '.name' "$CFG")"
 DEM="$ROOT/data/processed/$REGION/terrain/$RESOLUTION/${REGION}_${RESOLUTION}_dem.tif"
-ALIGNED="$ROOT/data/processed/$REGION/preview/${REGION}_lima_on_${RESOLUTION}_grid.tif"
+LIMA="$ROOT/data/processed/$REGION/imagery/lima/${REGION}_lima_15m.tif"
 
 [[ -f "$DEM" ]] || { echo "Missing terrain DEM: $DEM" >&2; exit 2; }
-if [[ ! -f "$ALIGNED" ]]; then
-  echo "Aligned LIMA raster not found; building alignment assets first ..."
-  bash "$ROOT/scripts/build_alignment_preview.sh" --region "$REGION" --resolution "$RESOLUTION"
-fi
+[[ -f "$LIMA" ]] || { echo "Missing LIMA imagery: $LIMA" >&2; echo "Run: bash scripts/fetch_lima.sh --region $REGION" >&2; exit 2; }
 
 OUT="$ROOT/data/processed/$REGION/viewer/$RESOLUTION"
 TILES="$OUT/tiles"
@@ -102,6 +99,7 @@ echo "Root grid:      ${ROOT_TILES_X} x ${ROOT_TILES_Y}"
 echo "Tile samples:   ${TILE_SAMPLES} x ${TILE_SAMPLES}"
 echo "Tile texture:   ${TEXTURE_SIZE} x ${TEXTURE_SIZE}"
 echo "Seam strategy:  shared level grid + overlapping edge samples"
+echo "Imagery source: direct LIMA 15 m tile sampling"
 echo "Total tiles:    $TOTAL"
 echo
 
@@ -169,7 +167,7 @@ for ((level=0; level<LEVELS; level++)); do
           -projwin_srs EPSG:3031 \
           -outsize "$TEXTURE_SIZE" "$TEXTURE_SIZE" \
           -co QUALITY=90 \
-          "$ALIGNED" "$texture"
+          "$LIMA" "$texture"
         rm -f "$texture.aux.xml"
       fi
 
