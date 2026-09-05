@@ -17,70 +17,85 @@ The footprint is approximately 61 km east-west by 17.8 km north-south.
 
 ## REMA tile selection
 
-PGC's REMA grid uses 100 km x 100 km parent tiles. At 2 m resolution, each parent tile is divided into four 50 km x 50 km subtiles.
+PGC's REMA grid is named by row/column position. The first tile index advances north-south and the second advances east-west. The 100 km parent grid begins at x=-4,000,000 m, y=-4,000,000 m in EPSG:3031.
 
-The Ferrar footprint crosses the parent-tile boundary at `x = 400000 m` and remains between `y = -1300000 m` and `y = -1250000 m`.
+The Ferrar footprint crosses the east-west parent-tile boundary at `x = 400000 m` and remains between `y = -1300000 m` and `y = -1200000 m`.
 
 Therefore the exact source set is:
 
 ### 10 m prototype
 
-- `44_28_10m_v2.0.tar.gz`
-- `45_28_10m_v2.0.tar.gz`
+- `28_44_10m_v2.0.tar.gz`
+- `28_45_10m_v2.0.tar.gz`
 
-These are full 100 km x 100 km 10 m parent tiles. The current PGC directory listings are approximately 743 MB and 740 MB respectively.
+These are full 100 km x 100 km 10 m parent tiles. PGC lists them at approximately 729 MB and 741 MB respectively.
 
 ### 2 m v0.0.1 terrain
 
-- `44_28_1_2_2m_v2.0.tar.gz` — lower-right subtile of `44_28`
-- `45_28_1_1_2m_v2.0.tar.gz` — lower-left subtile of `45_28`
+Each parent is subdivided into four 50 km x 50 km subtiles. PGC's subtile convention is:
 
-The current PGC directory listings are approximately 1.4 GB and 1.5 GB respectively.
+```text
+2_1 | 2_2
+----+----
+1_1 | 1_2
+```
 
-Only those two 2 m subtiles intersect the prototype footprint.
+The Ferrar footprint is in the lower half of both parents, spanning the right half of `28_44` and the left half of `28_45`. Therefore only these two 2 m subtiles intersect the footprint:
+
+- `28_44_1_2_2m_v2.0.tar.gz` — lower-right subtile of `28_44`
+- `28_45_1_1_2m_v2.0.tar.gz` — lower-left subtile of `28_45`
+
+## Correction note
+
+The first acquisition attempt incorrectly reversed the REMA row/column tile identifiers and downloaded `44_28` and `45_28`. The crop preflight exposed the mistake because the requested Ferrar window fell completely outside those rasters. The source identifiers above are the corrected values.
 
 ## Download
 
-The repository includes a standard-library Python downloader that reads URLs directly from the region definition.
+On Windows, use the PowerShell downloader:
 
-Start with the 10 m prototype:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\fetch_rema.ps1 -Region ferrar-glacier -Resolution 10m
+```
+
+The Python downloader remains available where Python is installed:
 
 ```bash
 python scripts/fetch_rema.py --region ferrar-glacier --resolution 10m
 ```
 
-Later, acquire the 2 m source terrain with:
+Later, acquire the 2 m terrain by changing the resolution to `2m`.
 
-```bash
-python scripts/fetch_rema.py --region ferrar-glacier --resolution 2m
-```
-
-Downloads are written under:
+Downloads are stored under:
 
 ```text
-data/raw/rema/v2.0/<resolution>/archives/
+data/raw/rema/<resolution>/archives/
 ```
 
-and the script extracts only the primary `*_dem.tif` from each archive into:
+and the primary `*_dem.tif` files are extracted under:
 
 ```text
-data/raw/rema/v2.0/<resolution>/dem/
+data/raw/rema/<resolution>/dem/
 ```
 
-Interrupted downloads leave a `.part` file and will attempt to resume on the next run when the PGC server supports HTTP Range requests.
+Interrupted downloads can be resumed when the PGC server supports HTTP Range requests.
 
 ## Next processing step
 
-After acquisition, the two DEMs should be mosaicked and cropped to the exact region BBOX. That processing step will be implemented separately so acquisition remains a simple, auditable stage.
+After acquisition, the configured DEMs are mosaicked and cropped to the exact region BBOX:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_rema_crop.ps1 -Region ferrar-glacier -Resolution 10m
+```
 
 Expected sequence:
 
 ```text
 PGC archives
     -> extract *_dem.tif
-    -> mosaic source DEMs
+    -> validate source extents
+    -> mosaic configured source DEMs
     -> crop exact EPSG:3031 BBOX
-    -> validate dimensions / NoData / elevation metadata
+    -> validate dimensions / NoData / valid pixels
     -> generate viewer terrain representation
 ```
 
