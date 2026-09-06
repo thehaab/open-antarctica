@@ -194,6 +194,8 @@ function createTerrainMaterial(texture, level = 1) {
         }
 
         gl_FragColor = vec4(finalColor, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `,
     side: THREE.DoubleSide,
