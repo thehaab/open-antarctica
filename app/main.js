@@ -23,12 +23,12 @@ const LEGACY_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrai
 const terrainStyle = {
   reliefEnabled: true,
   imageryEnabled: false,
-  imageryOpacity: 0.30,
+  imageryOpacity: 0.20,
   sunAzimuthDeg: 315,
-  sunElevationDeg: 35,
-  ambientStrength: 0.46,
-  diffuseStrength: 0.88,
-  slopeAccentStrength: 0.16,
+  sunElevationDeg: 28,
+  ambientStrength: 0.28,
+  diffuseStrength: 0.72,
+  slopeAccentStrength: 0.12,
 };
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -169,28 +169,29 @@ function createTerrainMaterial(texture, level = 1) {
         vec3 U = normalize(vUpView);
 
         float lambert = max(dot(N, L), 0.0);
-        float wrapped = clamp(lambert * 0.82 + 0.18, 0.0, 1.0);
+        float wrapped = clamp(lambert * 0.92 + 0.08, 0.0, 1.0);
         float slope = 1.0 - clamp(abs(dot(N, U)), 0.0, 1.0);
 
-        float reliefLight = uAmbientStrength + uDiffuseStrength * wrapped;
+        float reliefLight = clamp(uAmbientStrength + uDiffuseStrength * pow(wrapped, 1.12), 0.0, 1.0);
         float elevationTone = clamp(vElevation / 3200.0, 0.0, 1.0);
-        vec3 iceBase = mix(vec3(0.78, 0.82, 0.87), vec3(0.94, 0.96, 0.99), elevationTone * 0.22 + 0.34);
+        vec3 iceBase = mix(vec3(0.62, 0.68, 0.74), vec3(0.88, 0.92, 0.96), elevationTone * 0.18 + 0.30);
         vec3 reliefColor = iceBase * reliefLight;
-        reliefColor -= vec3(uSlopeAccentStrength * pow(slope, 0.72));
-        reliefColor = clamp(reliefColor, 0.035, 1.0);
+        reliefColor -= vec3(uSlopeAccentStrength * pow(slope, 0.80));
+        reliefColor = smoothstep(vec3(0.055), vec3(0.90), reliefColor);
+        reliefColor = clamp(reliefColor, 0.025, 0.94);
 
         vec3 finalColor = reliefColor;
 
         if (uHasImagery > 0.5 && uImageryEnabled > 0.5) {
           vec3 imagery = texture2D(uImagery, vUv).rgb;
-          vec3 shadedImagery = imagery * (0.70 + 0.48 * wrapped);
+          vec3 shadedImagery = imagery * (0.58 + 0.46 * wrapped);
           if (uReliefEnabled > 0.5) {
             finalColor = mix(reliefColor, shadedImagery, uImageryOpacity);
           } else {
             finalColor = imagery;
           }
         } else if (uReliefEnabled < 0.5) {
-          finalColor = vec3(0.72, 0.75, 0.79);
+          finalColor = vec3(0.66, 0.70, 0.75);
         }
 
         gl_FragColor = vec4(finalColor, 1.0);
