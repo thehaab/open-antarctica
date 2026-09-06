@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 const toggleEl = document.getElementById('atl06Toggle');
+const terrainToggleEl = document.getElementById('terrainSurfaceToggle');
 const focusEl = document.getElementById('atl06Focus');
 const metaEl = document.getElementById('atl06Meta');
 const exaggerationEl = document.getElementById('exaggeration');
@@ -9,10 +10,15 @@ const REGION = params.get('region') || 'ferrar-glacier';
 const RESOLUTION = params.get('resolution') || '10m';
 const COMPARISON_URL = `../data/processed/${REGION}/nasa/atl06-rema-comparison.json`;
 const TERRAIN_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-lod.json`;
+
+// Display-only styling. ATL06 measurements remain at their measured h_li elevations.
 const DISPLAY_LIFT_M = 1.5;
 const MAX_LINE_GAP_M = 250;
+const RIBBON_WIDTH_M = 90;
+const HALO_WIDTH_M = 210;
 
 let viewerApi = null;
+let terrainGroup = null;
 let overlayGroup = null;
 let loaded = false;
 let overlayBounds = null;
@@ -35,14 +41,18 @@ function colorForDelta(delta) {
   const value = Number(delta);
   const t = Math.min(Math.abs(value) / 2.0, 1.0);
   const neutral = new THREE.Color(0xffffff);
-  const endpoint = value < 0 ? new THREE.Color(0x00b7ff) : new THREE.Color(0xff7a18);
+  const endpoint = value < 0 ? new THREE.Color(0x00c8ff) : new THREE.Color(0xff6a00);
   return neutral.lerp(endpoint, t);
 }
 
 function syncOverlayState() {
-  if (!overlayGroup) return;
-  overlayGroup.visible = Boolean(toggleEl?.checked);
-  overlayGroup.scale.y = Number(exaggerationEl?.value || 1);
+  if (overlayGroup) {
+    overlayGroup.visible = Boolean(toggleEl?.checked);
+    overlayGroup.scale.y = Number(exaggerationEl?.value || 1);
+  }
+  if (terrainGroup && terrainToggleEl) {
+    terrainGroup.visible = terrainToggleEl.checked;
+  }
   requestRender();
 }
 
@@ -66,35 +76,102 @@ function buildRuns(points) {
   return runs;
 }
 
-function addRunLine(run, xOffset, zOffset, elevationMin) {
-  const positions = new Float32Array(run.length * 3);
-  const colors = new Float32Array(run.length * 3);
+function ribbonGeometry(run, widthM, xOffset, zOffset, elevationMin, withColors) {
+  const n = run.length;
+  const positions = new Float32Array(n * 2 * 3);
+  const colors = withColors ? new Float32Array(n * 2 * 3) : null;
+  const indices = new Uint32Array((n - 1) * 6);
+  const half = widthM * 0.5;
+
   let p = 0;
   let c = 0;
-  for (const point of run) {
-    positions[p++] = Number(point.x_m) + xOffset;
-    positions[p++] = Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M;
-    positions[p++] = Number(point.z_m) + zOffset;
-    const color = colorForDelta(point.delta_h_m);
-    colors[c++] = color.r;
-    colors[c++] = color.g;
-    colors[c++] = color.b;
+  for (let i = 0; i < n; i += 1) {
+    const point = run[i];
+    const prev = run[Math.max(0, i - 1)];
+    const next = run[Math.min(n - 1, i + 1)];
+    let dx = Number(next.x_m) - Number(prev.x_m);
+    let dz = Number(next.z_m) - Number(prev.z_m);
+    const length = Math.hypot(dx, dz) || 1;
+    dx /= length;
+    dz /= length;
+    const px = -dz * half;
+    const pz = dx * half;
+
+    const x = Number(point.x_m) + xOffset;
+    const y = Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M;
+    const z = Number(point.z_m) + zOffset;
+
+    positions[p++] = x + px;
+    positions[p++] = y;
+    positions[p++] = z + pz;
+    positions[p++] = x - px;
+    positions[p++] = y;
+    positions[p++] = z - pz;
+
+    if (colors) {
+      const color = colorForDelta(point.delta_h_m);
+      for (let side = 0; side < 2; side += 1) {
+        colors[c++] = color.r;
+        colors[c++] = color.g;
+        colors[c++] = color.b;
+      }
+    }
+  }
+
+  let k = 0;
+  for (let i = 0; i < n - 1; i += 1) {
+    const a = i * 2;
+    const b = a + 1;
+    const d = a + 2;
+    const e = a + 3;
+    indices[k++] = a;
+    indices[k++] = d;
+    indices[k++] = b;
+    indices[k++] = b;
+    indices[k++] = d;
+    indices[k++] = e;
   }
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const material = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.98,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const line = new THREE.Line(geometry, material);
-  line.renderOrder = 51;
-  line.frustumCulled = false;
-  overlayGroup.add(line);
+  if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function addRunRibbon(run, xOffset, zOffset, elevationMin) {
+  const halo = new THREE.Mesh(
+    ribbonGeometry(run, HALO_WIDTH_M, xOffset, zOffset, elevationMin, false),
+    new THREE.MeshBasicMaterial({
+      color: 0x02070b,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.92,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+    }),
+  );
+  halo.renderOrder = 60;
+  halo.frustumCulled = false;
+  overlayGroup.add(halo);
+
+  const ribbon = new THREE.Mesh(
+    ribbonGeometry(run, RIBBON_WIDTH_M, xOffset, zOffset, elevationMin, true),
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 1,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+    }),
+  );
+  ribbon.renderOrder = 61;
+  ribbon.frustumCulled = false;
+  overlayGroup.add(ribbon);
 }
 
 function addTrackPoints(points, beam, xOffset, zOffset, elevationMin) {
@@ -118,62 +195,58 @@ function addTrackPoints(points, beam, xOffset, zOffset, elevationMin) {
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geometry.computeBoundingSphere();
 
-  // Dark halo makes the measurement visible over both white ice and dark rock.
   const halo = new THREE.Points(
     geometry,
     new THREE.PointsMaterial({
-      size: 8,
+      size: 12,
       sizeAttenuation: false,
-      color: 0x071018,
+      color: 0x02070b,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.95,
       depthTest: false,
       depthWrite: false,
+      fog: false,
     }),
   );
   halo.name = `ATL06 ${beam} halo`;
-  halo.renderOrder = 50;
+  halo.renderOrder = 62;
   halo.frustumCulled = false;
   overlayGroup.add(halo);
 
   const pointsObject = new THREE.Points(
     geometry,
     new THREE.PointsMaterial({
-      size: 4.5,
+      size: 7,
       sizeAttenuation: false,
       vertexColors: true,
       transparent: true,
       opacity: 1,
       depthTest: false,
       depthWrite: false,
+      fog: false,
     }),
   );
   pointsObject.name = `ATL06 ${beam}`;
-  pointsObject.renderOrder = 52;
+  pointsObject.renderOrder = 63;
   pointsObject.frustumCulled = false;
   overlayGroup.add(pointsObject);
 }
 
 function focusOverlay() {
-  if (!overlayBounds || !viewerApi?.camera) return;
-  const controls = viewerApi.controls;
-  if (!controls) {
-    metaEl.insertAdjacentHTML('beforeend', '<br><em>Focus control is waiting for the terrain viewer bridge.</em>');
-    return;
-  }
+  if (!overlayBounds || !viewerApi?.camera || !viewerApi?.controls) return;
 
   const center = overlayBounds.getCenter(new THREE.Vector3());
   const size = overlayBounds.getSize(new THREE.Vector3());
   const span = Math.max(size.x, size.z, 4000);
   const vertical = Math.max(size.y, 1200);
 
-  controls.target.copy(center);
+  viewerApi.controls.target.copy(center);
   viewerApi.camera.position.set(
-    center.x + span * 0.38,
-    center.y + Math.max(span * 0.42, vertical * 2.5),
-    center.z + span * 0.82,
+    center.x + span * 0.30,
+    center.y + Math.max(span * 0.34, vertical * 2.2),
+    center.z + span * 0.62,
   );
-  controls.update();
+  viewerApi.controls.update();
   requestRender();
 }
 
@@ -199,6 +272,8 @@ async function buildOverlay() {
       throw new Error('ATL06 overlay metadata is incomplete');
     }
 
+    terrainGroup = viewerApi.scene.children.find((child) => child.isGroup) || null;
+
     const terrainCenterX = (Number(extent.xmin) + Number(extent.xmax)) * 0.5;
     const terrainCenterY = (Number(extent.ymin) + Number(extent.ymax)) * 0.5;
     const xOffset = Number(origin.x) - terrainCenterX;
@@ -206,11 +281,12 @@ async function buildOverlay() {
 
     overlayGroup = new THREE.Group();
     overlayGroup.name = 'ICESat-2 ATL06 dated science overlay';
-    overlayGroup.renderOrder = 50;
+    overlayGroup.renderOrder = 60;
     overlayBounds = new THREE.Box3();
 
     let pointCount = 0;
     let beamCount = 0;
+    let runCount = 0;
     for (const track of comparison.tracks || []) {
       const points = Array.isArray(track.points) ? track.points : [];
       if (!points.length) continue;
@@ -225,8 +301,10 @@ async function buildOverlay() {
         ));
       }
 
+      const runs = buildRuns(points);
+      runCount += runs.length;
+      for (const run of runs) addRunRibbon(run, xOffset, zOffset, elevationMin);
       addTrackPoints(points, track.beam || 'beam', xOffset, zOffset, elevationMin);
-      for (const run of buildRuns(points)) addRunLine(run, xOffset, zOffset, elevationMin);
     }
 
     viewerApi.scene.add(overlayGroup);
@@ -237,11 +315,11 @@ async function buildOverlay() {
     const summary = comparison.summary?.robust_points || comparison.summary?.all_points || {};
     metaEl.innerHTML = [
       '<strong>ICESat-2 ATL06 science overlay</strong>',
-      `Pass: ${esc(dateOnly(sourceTime))} · ${beamCount} beams · ${pointCount.toLocaleString()} segments`,
+      `Pass: ${esc(dateOnly(sourceTime))} · ${beamCount} beams · ${pointCount.toLocaleString()} segments · ${runCount} visible runs`,
       `ATL06 − REMA median: ${Number(summary.median_m).toFixed(3)} m`,
       `RMSE: ${Number(summary.rmse_m).toFixed(3)} m · p05…p95: ${Number(summary.p05_m).toFixed(3)}…${Number(summary.p95_m).toFixed(3)} m`,
       'Color: cyan = below REMA · white ≈ agreement · orange = above REMA',
-      '<strong>Display mode: x-ray track</strong> — points/lines are intentionally drawn through terrain so the dated measurement path cannot disappear behind the surface.',
+      `<strong>X-ray display:</strong> ${RIBBON_WIDTH_M} m-wide colored center ribbons with ${HALO_WIDTH_M} m dark halos; these widths are visualization strokes, not ICESat-2 measurement footprints.`,
       `<em>Measured ATL06 height; ${DISPLAY_LIFT_M.toFixed(1)} m display lift only. REMA is not corrected.</em>`,
     ].join('<br>');
   } catch (error) {
@@ -265,6 +343,7 @@ function attach(api) {
 }
 
 if (toggleEl) toggleEl.addEventListener('change', syncOverlayState);
+if (terrainToggleEl) terrainToggleEl.addEventListener('change', syncOverlayState);
 if (focusEl) {
   focusEl.disabled = true;
   focusEl.addEventListener('click', focusOverlay);
