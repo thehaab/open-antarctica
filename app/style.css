@@ -106,6 +106,52 @@ output {
   transition: opacity 120ms ease;
 }
 
+.select-control {
+  display: block;
+  margin-top: 14px;
+}
+
+select {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 7px;
+  background: #171d25;
+  color: #edf2f6;
+  font: inherit;
+  font-size: 12px;
+}
+
+.science-legend {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.035);
+  color: #aeb9c5;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.legend-item {
+  white-space: nowrap;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 4px;
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+
 button {
   width: 100%;
   margin-top: 16px;
