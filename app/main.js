@@ -55,6 +55,8 @@ const MAX_READY_TILES = RESOLUTION === '2m' ? 96 : 96;
 const MAX_TARGET_VISIBLE = RESOLUTION === '2m' ? 60 : 72;
 const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
 const LOD_UPDATE_INTERVAL_MS = 90;
+const MAX_RENDER_FPS = RESOLUTION === '2m' ? 45 : 60;
+const MIN_RENDER_INTERVAL_MS = 1000 / MAX_RENDER_FPS;
 
 let activeLoads = 0;
 let lodMeta = null;
@@ -69,12 +71,18 @@ let currentRenderLevel = 0;
 let currentWantedKeys = new Set();
 let lodDirty = true;
 let lastLodUpdate = 0;
+let renderDirty = true;
+let lastRenderTime = -Infinity;
 
 function setStatus(text, error = false) {
   if (text === lastStatus && !error) return;
   lastStatus = text;
   statusEl.textContent = text;
   statusEl.classList.toggle('error', error);
+}
+
+function requestRender() {
+  renderDirty = true;
 }
 
 function isRootKey(key) {
@@ -87,6 +95,7 @@ function resetView() {
   controls.target.copy(defaultCamera.target);
   controls.update();
   lodDirty = true;
+  requestRender();
 }
 
 function setDefaultCamera(spanX, spanZ, relief) {
@@ -224,6 +233,7 @@ function pumpLoadQueue() {
       .finally(() => {
         activeLoads -= 1;
         lodDirty = true;
+        requestRender();
         pumpLoadQueue();
       });
   }
@@ -332,6 +342,7 @@ function ensureTile(level, x, y, priority = 0) {
     state.lastUsed = performance.now();
     applyMaterialControls(mesh, loadedTexture);
     lodDirty = true;
+    requestRender();
     return state;
   }, priority, cancel).catch((error) => {
     if (tileCache.get(key) === state) tileCache.delete(key);
@@ -499,9 +510,8 @@ function updateLOD() {
   updateVisibility(renderKeys);
   evictTiles();
   updateStatus(targetLevel, renderKeys, nextKeys);
+  requestRender();
 
-  // If a whole level just became ready, immediately schedule the next refinement
-  // pass instead of waiting for another camera movement to wake the LOD manager.
   lodDirty = advanced && currentRenderLevel < targetLevel;
 }
 
@@ -534,11 +544,13 @@ async function loadLODTerrain(metaResponse) {
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
     `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
+    `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
     `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
   ].join('<br>');
 
   currentRenderLevel = 0;
   lodDirty = true;
+  requestRender();
 }
 
 async function loadLegacyTerrain() {
@@ -626,6 +638,7 @@ async function loadLegacyTerrain() {
     '<em>Build LOD assets for higher detail.</em>',
   ].join('<br>');
   setStatus(`REMA ${RESOLUTION} + LIMA · legacy mesh`);
+  requestRender();
 }
 
 async function loadTerrain() {
@@ -642,19 +655,23 @@ exaggerationEl.addEventListener('input', () => {
   exaggerationValueEl.textContent = `${value.toFixed(1)}×`;
   forEachTerrain((mesh) => { mesh.scale.y = value; });
   lodDirty = true;
+  requestRender();
 });
 
 textureToggleEl.addEventListener('change', () => {
   forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
+  requestRender();
 });
 
 wireframeToggleEl.addEventListener('change', () => {
   forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
+  requestRender();
 });
 
 resetViewEl.addEventListener('click', resetView);
 controls.addEventListener('change', () => {
   if (lodMeta) lodDirty = true;
+  requestRender();
 });
 
 window.addEventListener('resize', () => {
@@ -662,15 +679,27 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   lodDirty = true;
+  requestRender();
 });
 
 function animate(now = 0) {
-  controls.update();
+  const controlsChanged = controls.update();
+  if (controlsChanged) {
+    if (lodMeta) lodDirty = true;
+    requestRender();
+  }
+
   if (lodMeta && lodDirty && now - lastLodUpdate >= LOD_UPDATE_INTERVAL_MS) {
     lastLodUpdate = now;
     updateLOD();
   }
-  renderer.render(scene, camera);
+
+  if (renderDirty && now - lastRenderTime >= MIN_RENDER_INTERVAL_MS) {
+    renderer.render(scene, camera);
+    lastRenderTime = now;
+    renderDirty = false;
+  }
+
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
