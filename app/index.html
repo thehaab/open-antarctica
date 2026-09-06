@@ -48,6 +48,13 @@
 
     <label class="check"><input id="wireframeToggle" type="checkbox"> Wireframe</label>
     <label class="check"><input id="atl06Toggle" type="checkbox" checked> ICESat-2 ATL06 overlay</label>
+
+    <label id="atl06PassControl" class="select-control" hidden>
+      <span>ATL06 observation</span>
+      <select id="atl06PassSelect" aria-label="ATL06 observation date"></select>
+    </label>
+
+    <div id="atl06Legend" class="science-legend" hidden></div>
     <button id="atl06Focus" type="button" disabled>Focus ATL06 pass</button>
 
     <button id="resetView" type="button">Reset view</button>
@@ -61,6 +68,7 @@
       <strong>ICESat-2 ATL06 science overlay</strong><br>
       Overlay module: loading…
     </div>
+    <div class="meta" id="atl06Inspect" hidden></div>
     <div class="provenance">
       Terrain: PGC REMA v2<br>
       Imagery: USGS LIMA 15 m<br>
@@ -72,6 +80,6 @@
 
   <div class="hint">Drag to orbit · wheel to zoom · right-drag to pan</div>
 
-  <script type="module" src="./bootstrap.js?v=20260906-atl06-core-v8"></script>
+  <script type="module" src="./bootstrap.js?v=20260906-atl06-series-v9"></script>
 </body>
 </html>
