@@ -100,7 +100,7 @@ This command performs one mission-era CMR search, selects unique observation dat
 data/processed/ferrar-glacier/nasa/atl06-series.json
 ```
 
-The viewer detects this file automatically and exposes an **ATL06 observation** selector. Each selected pass remains explicitly dated and carries ATL06 `h_li`, REMA elevation, and `delta_h_m = ATL06 - REMA`. This sampled pass set is for temporal exploration; it is not yet a formal repeat-ground-track `dh/dt` product. ATL11 remains the planned repeat-track time-series authority.
+The viewer detects this file automatically and exposes an **ATL06 observation** selector. Each selected pass remains explicitly dated and carries ATL06 `h_li`, REMA elevation, and `delta_h_m = ATL06 - REMA`. This sampled pass set is for temporal exploration; it is not a formal repeat-ground-track `dh/dt` product.
 
 ### Build mission-era ATL06 coverage overview
 
@@ -122,10 +122,29 @@ The viewer then enables **ICESat-2 mission coverage**. The coverage layer prefer
 
 This is deliberately labeled a **CMR granule-footprint coverage proxy**. It is useful for answering where ICESat-2 repeatedly intersects the crop, but it is not the six exact laser-beam paths. Exact beam geometry still comes only from downloaded ATL06 HDF5 science data.
 
+### Build ATL11 repeat-track height-change science layer
+
+ATL11 is the repeat-track product used for same-place height histories. Download the ATL11 v007 granules intersecting Ferrar and extract quality-filtered reference-point time series:
+
+```bash
+python3 scripts/fetch_atl11_timeseries.py \
+  --region ferrar-glacier
+```
+
+By default the browser product keeps every fourth in-region ATL11 reference point, requires at least three good cycles spanning at least one year, and uses only cycles with `quality_summary == 0`. The script writes:
+
+```text
+data/processed/ferrar-glacier/nasa/atl11-timeseries.json
+```
+
+For every retained fixed reference point it stores the cycle dates/heights, first-to-last `delta_h_m`, and an ordinary least-squares `trend_m_per_yr`. The viewer enables **ICESat-2 ATL11 repeat-track change**, with blue indicating lowering, white near-stable height, and orange indicating rising height. A repeat-track selector can isolate one RGT/beam-pair corridor, and clicking a point shows its time span, cycle count, first/latest height, total change, trend, slope uncertainty, and fit residual.
+
+The ATL11 layer is intentionally separate from REMA comparison. Its `dh/dt` is computed from repeated ATL11 measurements at the same ATL11 reference point; REMA is not modified or used as the temporal baseline.
+
 After building the index and science data, add an epoch to the viewer URL with, for example:
 
 ```text
 http://localhost:8000/app/?resolution=2m&epoch=2026-09-01
 ```
 
-Add `&atl06debug=1` only while debugging overlay bounds. Debug helpers are part of the ATL06 layer and disappear when that layer is disabled.
+Add `&atl06debug=1` only while debugging ATL06 overlay bounds. Debug helpers are part of the ATL06 layer and disappear when that layer is disabled.
