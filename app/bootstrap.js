@@ -105,7 +105,7 @@ const coverageModulePromise = import('./atl06-coverage.js?v=20260906-atl06-cover
     return null;
   });
 
-const atl11ModulePromise = import('./atl11-change.js?v=20260906-atl11-change-v11')
+const atl11ModulePromise = import('./atl11-change.js?v=20260906-atl11-change-v12')
   .catch((error) => {
     showLayerModuleError({
       label: 'ICESat-2 ATL11 repeat-track change',
