@@ -58,11 +58,13 @@ const boundsCache = new Map();
 const loadQueue = [];
 const lodFrustum = new THREE.Frustum();
 const projectionView = new THREE.Matrix4();
-const sphereScratch = new THREE.Sphere();
+const boxScratch = new THREE.Box3();
 
 const MAX_CONCURRENT_LOADS = 6;
 const MAX_READY_TILES = 96;
-const MAX_TARGET_VISIBLE = RESOLUTION === '2m' ? 60 : 72;
+const MAX_TARGET_VISIBLE_MOVING = RESOLUTION === '2m' ? 60 : 72;
+const MAX_TARGET_VISIBLE_SETTLED = RESOLUTION === '2m' ? 112 : 96;
+const SETTLE_REFINEMENT_DELAY_MS = 650;
 const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
 const LOD_UPDATE_INTERVAL_MS = 90;
 const MAX_RENDER_FPS = RESOLUTION === '2m' ? 45 : 60;
@@ -83,6 +85,8 @@ let lodDirty = true;
 let lastLodUpdate = 0;
 let renderDirty = true;
 let lastRenderTime = -Infinity;
+let lastInteractionTime = performance.now();
+let settleRefinementApplied = false;
 
 function setStatus(text, error = false) {
   if (text === lastStatus && !error) return;
@@ -495,9 +499,17 @@ function tileIsVisible(level, x, y) {
   const bounds = tileBounds(level, x, y);
   const exaggeration = Number(exaggerationEl.value);
   const relief = (lodMeta.elevation.max - lodMeta.elevation.min) * exaggeration;
-  sphereScratch.center.set(bounds.centerX, relief * 0.5, bounds.centerZ);
-  sphereScratch.radius = Math.hypot(bounds.width * 0.5, bounds.depth * 0.5, relief * 0.5);
-  return lodFrustum.intersectsSphere(sphereScratch);
+  boxScratch.min.set(
+    bounds.centerX - bounds.width * 0.5,
+    0,
+    bounds.centerZ - bounds.depth * 0.5,
+  );
+  boxScratch.max.set(
+    bounds.centerX + bounds.width * 0.5,
+    relief,
+    bounds.centerZ + bounds.depth * 0.5,
+  );
+  return lodFrustum.intersectsBox(boxScratch);
 }
 
 function visibleTileKeys(level) {
@@ -517,6 +529,8 @@ function chooseTargetLevel() {
   const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
   const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
   const distance = Math.max(camera.position.distanceTo(controls.target), 250);
+  const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
+  const visibleBudget = settled ? MAX_TARGET_VISIBLE_SETTLED : MAX_TARGET_VISIBLE_MOVING;
 
   let desired = lodMeta.lod.maxLevel;
   for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
@@ -531,7 +545,7 @@ function chooseTargetLevel() {
 
   while (desired > 0) {
     const keys = visibleTileKeys(desired);
-    if (keys.length <= MAX_TARGET_VISIBLE) return { level: desired, keys };
+    if (keys.length <= visibleBudget) return { level: desired, keys };
     desired -= 1;
   }
   return { level: 0, keys: visibleTileKeys(0) };
@@ -602,11 +616,13 @@ function updateStatus(targetLevel, renderKeys, nextKeys) {
   const readyCount = [...tileCache.values()].filter((state) => state.ready).length;
   const renderReady = renderKeys.filter((key) => tileCache.get(key)?.ready).length;
   const shownCount = [...tileCache.values()].filter((state) => state.ready && state.mesh?.visible).length;
+  const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
   setStatus(
     `${getSurfaceModeLabel()} · REMA ${RESOLUTION} · target LOD ${targetLevel}/${lodMeta.lod.maxLevel}` +
     ` · shown ${currentRenderLevel}` +
     ` · surface ${renderReady}/${renderKeys.length}` +
     ` · ${shownCount} drawn · ${readyCount} cached` +
+    (settled ? ' · settled refine' : ' · moving') +
     (activeLoads ? ` · ${activeLoads} active` : '') +
     (loadQueue.length ? ` · ${loadQueue.length} queued` : '') +
     (nextKeys.length ? ` · warming LOD ${Math.min(currentRenderLevel + 1, lodMeta.lod.maxLevel)}` : ''),
@@ -678,6 +694,8 @@ async function loadLODTerrain(metaResponse) {
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
     `surface: native REMA relief; LIMA optional blend`,
     `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
+    `moving tile budget: ${MAX_TARGET_VISIBLE_MOVING} · settled refine budget: ${MAX_TARGET_VISIBLE_SETTLED}`,
+    `settled refinement delay: ${SETTLE_REFINEMENT_DELAY_MS} ms`,
     `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
     `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
   ].join('<br>');
@@ -815,6 +833,8 @@ wireframeToggleEl.addEventListener('change', () => {
 
 resetViewEl.addEventListener('click', resetView);
 controls.addEventListener('change', () => {
+  lastInteractionTime = performance.now();
+  settleRefinementApplied = false;
   if (lodMeta) lodDirty = true;
   requestRender();
 });
@@ -823,6 +843,8 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  lastInteractionTime = performance.now();
+  settleRefinementApplied = false;
   lodDirty = true;
   requestRender();
 });
@@ -830,8 +852,19 @@ window.addEventListener('resize', () => {
 function animate(now = 0) {
   const controlsChanged = controls.update();
   if (controlsChanged) {
+    lastInteractionTime = now;
+    settleRefinementApplied = false;
     if (lodMeta) lodDirty = true;
     requestRender();
+  }
+
+  if (
+    lodMeta &&
+    !settleRefinementApplied &&
+    now - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS
+  ) {
+    settleRefinementApplied = true;
+    lodDirty = true;
   }
 
   if (lodMeta && lodDirty && now - lastLodUpdate >= LOD_UPDATE_INTERVAL_MS) {
