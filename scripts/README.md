@@ -65,7 +65,25 @@ python3 scripts/fetch_atl06.py \
 data/processed/ferrar-glacier/nasa/atl06-track.json
 ```
 
-By default only segments with `ATL06_quality_summary == 0` are retained. The output preserves ATL06 `h_li`, latitude, longitude, `delta_time`, beam identity, and local EPSG:3031 x/z coordinates. It deliberately does not deform REMA: vertical-reference compatibility must be validated before any height correction is applied.
+By default only segments with `ATL06_quality_summary == 0` are retained. The output preserves ATL06 `h_li`, latitude, longitude, `delta_time`, beam identity, and local EPSG:3031 x/z coordinates. It deliberately does not deform REMA.
+
+### Validate ATL06 against the rendered REMA surface
+
+Raw PGC REMA and ATL06 `h_li` both use WGS84-ellipsoid heights, but the datasets are not contemporaneous. Before visualizing ATL06 as a surface comparison, sample the exact finest-level REMA height tiles used by the browser:
+
+```bash
+python3 scripts/validate_atl06_rema.py \
+  --region ferrar-glacier \
+  --resolution 2m
+```
+
+The validator writes:
+
+```text
+data/processed/ferrar-glacier/nasa/atl06-rema-comparison.json
+```
+
+It reports ATL06 minus REMA elevation deltas overall and by beam, including robust median/MAD statistics. It does not modify or vertically shift REMA. Differences can contain true elevation change because the REMA mosaic is a multi-date composite while the ATL06 pass is explicitly dated.
 
 After building the index, the local viewer reports the selected epoch. Add an epoch to the viewer URL with, for example:
 
@@ -73,4 +91,4 @@ After building the index, the local viewer reports the selected epoch. Add an ep
 http://localhost:8000/app/?resolution=2m&epoch=2026-09-01
 ```
 
-Actual ATL06 track rendering is the next visualization pipeline step after science-data extraction and vertical-reference validation.
+Actual ATL06 track rendering follows this validation step.
