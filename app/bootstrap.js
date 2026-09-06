@@ -67,32 +67,18 @@ OrbitControls.prototype.update = function openAntarcticaControlsBridge(...args) 
 
 if (terrainSurfaceToggleEl) terrainSurfaceToggleEl.addEventListener('change', syncTerrainSurface);
 
-function showAtl06ModuleError(error) {
-  console.error('ATL06 overlay module failed to load:', error);
-  const meta = document.getElementById('atl06Meta');
-  const toggle = document.getElementById('atl06Toggle');
-  const focus = document.getElementById('atl06Focus');
+function showLayerModuleError({ label, metaId, toggleId, focusId }, error) {
+  console.error(`${label} module failed to load:`, error);
+  const meta = document.getElementById(metaId);
+  const toggle = document.getElementById(toggleId);
+  const focus = focusId ? document.getElementById(focusId) : null;
   if (toggle) {
     toggle.checked = false;
     toggle.disabled = true;
   }
   if (focus) focus.disabled = true;
   if (meta) {
-    meta.innerHTML = '<strong>ICESat-2 ATL06 science overlay</strong><br>' +
-      '<strong>Module load error:</strong> ' + String(error?.message || error);
-  }
-}
-
-function showCoverageModuleError(error) {
-  console.error('ATL06 coverage module failed to load:', error);
-  const meta = document.getElementById('atl06CoverageMeta');
-  const toggle = document.getElementById('atl06CoverageToggle');
-  if (toggle) {
-    toggle.checked = false;
-    toggle.disabled = true;
-  }
-  if (meta) {
-    meta.innerHTML = '<strong>ICESat-2 mission coverage</strong><br>' +
+    meta.innerHTML = `<strong>${label}</strong><br>` +
       '<strong>Module load error:</strong> ' + String(error?.message || error);
   }
 }
@@ -100,16 +86,36 @@ function showCoverageModuleError(error) {
 // Register science-layer listeners before main.js creates the viewer.
 const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-series-v9')
   .catch((error) => {
-    showAtl06ModuleError(error);
+    showLayerModuleError({
+      label: 'ICESat-2 ATL06 science overlay',
+      metaId: 'atl06Meta',
+      toggleId: 'atl06Toggle',
+      focusId: 'atl06Focus',
+    }, error);
     return null;
   });
 
 const coverageModulePromise = import('./atl06-coverage.js?v=20260906-atl06-coverage-v10')
   .catch((error) => {
-    showCoverageModuleError(error);
+    showLayerModuleError({
+      label: 'ICESat-2 mission coverage',
+      metaId: 'atl06CoverageMeta',
+      toggleId: 'atl06CoverageToggle',
+    }, error);
+    return null;
+  });
+
+const atl11ModulePromise = import('./atl11-change.js?v=20260906-atl11-change-v11')
+  .catch((error) => {
+    showLayerModuleError({
+      label: 'ICESat-2 ATL11 repeat-track change',
+      metaId: 'atl11Meta',
+      toggleId: 'atl11Toggle',
+      focusId: 'atl11Focus',
+    }, error);
     return null;
   });
 
 await import('./main.js?v=20260906-uniform-lod');
 await import('./nasa-time.js?v=20260906-atl11-series-v3');
-await Promise.all([atl06ModulePromise, coverageModulePromise]);
+await Promise.all([atl06ModulePromise, coverageModulePromise, atl11ModulePromise]);
