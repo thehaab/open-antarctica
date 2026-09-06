@@ -45,6 +45,17 @@ function dateOnly(value) {
   return value ? String(value).slice(0, 10) : 'unknown date';
 }
 
+function updateMeta(extra = '') {
+  if (!metaEl) return;
+  metaEl.innerHTML = [summaryHtml, extra].filter(Boolean).join('<br>');
+}
+
+// This line executes as soon as the browser has actually evaluated this module.
+// It separates a module-loading failure from a viewer-bridge/data failure.
+summaryHtml = '<strong>ICESat-2 ATL06 science overlay</strong>';
+updateMeta('<strong>Overlay module:</strong> executed · waiting for viewer bridge…');
+window.openAntarcticaAtl06ModuleExecuted = true;
+
 function requestRender() {
   if (!viewerApi) return;
   viewerApi.scene?.updateMatrixWorld?.(true);
@@ -172,11 +183,6 @@ function deriveDominantDirection(longestRun) {
   if (len > 1) dominantTrackDirection.set(dx / len, dz / len);
 }
 
-function updateMeta(extra = '') {
-  if (!metaEl) return;
-  metaEl.innerHTML = [summaryHtml, extra].filter(Boolean).join('<br>');
-}
-
 function focusOverlay() {
   if (!overlayBounds || !viewerApi?.camera || !viewerApi?.controls) {
     updateMeta('<strong>Focus:</strong> viewer controls are not available.');
@@ -229,15 +235,15 @@ function addDebugBounds() {
 async function buildOverlay() {
   if (loaded || !viewerApi) return;
   loaded = true;
-  updateMeta('<strong>ICESat-2 ATL06 science overlay</strong><br>Overlay module loaded; reading local comparison data…');
+  updateMeta('<strong>Overlay module:</strong> attached · reading local comparison data…');
 
   try {
     const [comparisonResponse, terrainResponse] = await Promise.all([
       fetch(COMPARISON_URL, { cache: 'no-store' }),
       fetch(TERRAIN_META_URL, { cache: 'no-store' }),
     ]);
-    if (!comparisonResponse.ok) throw new Error('ATL06/REMA comparison not built locally');
-    if (!terrainResponse.ok) throw new Error(`Terrain metadata unavailable for ${RESOLUTION}`);
+    if (!comparisonResponse.ok) throw new Error(`ATL06/REMA comparison HTTP ${comparisonResponse.status}`);
+    if (!terrainResponse.ok) throw new Error(`Terrain metadata HTTP ${terrainResponse.status} for ${RESOLUTION}`);
 
     const comparison = await comparisonResponse.json();
     const terrainMeta = await terrainResponse.json();
@@ -302,6 +308,10 @@ async function buildOverlay() {
     ].filter(Boolean).join('<br>');
     updateMeta('<strong>Overlay status:</strong> ready');
     if (focusEl) focusEl.disabled = false;
+
+    // Debug URLs are explicitly asking to inspect this layer, so make the first
+    // successful load self-proving rather than requiring another click.
+    if (DEBUG) focusOverlay();
   } catch (error) {
     console.error('ATL06 overlay failed:', error);
     if (toggleEl) {
@@ -317,6 +327,7 @@ async function buildOverlay() {
 function attach(api) {
   if (!api || viewerApi) return;
   viewerApi = api;
+  updateMeta('<strong>Overlay module:</strong> viewer bridge received…');
   buildOverlay();
 }
 
