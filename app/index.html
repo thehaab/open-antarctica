@@ -34,7 +34,17 @@
       </div>
     </label>
 
-    <label class="check"><input id="textureToggle" type="checkbox" checked> LIMA imagery</label>
+    <label class="check"><input id="reliefToggle" type="checkbox" checked> REMA relief</label>
+    <label class="check"><input id="textureToggle" type="checkbox"> LIMA imagery</label>
+
+    <label id="imageryBlendControl">
+      <span>LIMA blend</span>
+      <div class="row">
+        <input id="imageryOpacity" type="range" min="0" max="100" step="5" value="30">
+        <output id="imageryOpacityValue">30%</output>
+      </div>
+    </label>
+
     <label class="check"><input id="wireframeToggle" type="checkbox"> Wireframe</label>
 
     <button id="resetView" type="button">Reset view</button>
