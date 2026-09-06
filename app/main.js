@@ -6,7 +6,11 @@ const statusEl = document.getElementById('status');
 const metaEl = document.getElementById('meta');
 const exaggerationEl = document.getElementById('exaggeration');
 const exaggerationValueEl = document.getElementById('exaggerationValue');
+const reliefToggleEl = document.getElementById('reliefToggle');
 const textureToggleEl = document.getElementById('textureToggle');
+const imageryOpacityEl = document.getElementById('imageryOpacity');
+const imageryOpacityValueEl = document.getElementById('imageryOpacityValue');
+const imageryBlendControlEl = document.getElementById('imageryBlendControl');
 const wireframeToggleEl = document.getElementById('wireframeToggle');
 const resetViewEl = document.getElementById('resetView');
 
@@ -15,6 +19,17 @@ const REGION = params.get('region') || 'ferrar-glacier';
 const RESOLUTION = params.get('resolution') || '10m';
 const LOD_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-lod.json`;
 const LEGACY_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain.json`;
+
+const terrainStyle = {
+  reliefEnabled: true,
+  imageryEnabled: false,
+  imageryOpacity: 0.30,
+  sunAzimuthDeg: 315,
+  sunElevationDeg: 35,
+  ambientStrength: 0.46,
+  diffuseStrength: 0.88,
+  slopeAccentStrength: 0.16,
+};
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
@@ -34,11 +49,6 @@ controls.screenSpacePanning = true;
 controls.minDistance = 250;
 controls.maxDistance = 180000;
 
-scene.add(new THREE.HemisphereLight(0xd9e8ff, 0x18202b, 1.2));
-const sun = new THREE.DirectionalLight(0xffffff, 2.4);
-sun.position.set(-1, 2, 1.2);
-scene.add(sun);
-
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
 
@@ -51,7 +61,7 @@ const projectionView = new THREE.Matrix4();
 const sphereScratch = new THREE.Sphere();
 
 const MAX_CONCURRENT_LOADS = 6;
-const MAX_READY_TILES = RESOLUTION === '2m' ? 96 : 96;
+const MAX_READY_TILES = 96;
 const MAX_TARGET_VISIBLE = RESOLUTION === '2m' ? 60 : 72;
 const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
 const LOD_UPDATE_INTERVAL_MS = 90;
@@ -85,6 +95,151 @@ function requestRender() {
   renderDirty = true;
 }
 
+function getSunDirection() {
+  const az = THREE.MathUtils.degToRad(terrainStyle.sunAzimuthDeg);
+  const el = THREE.MathUtils.degToRad(terrainStyle.sunElevationDeg);
+  const cosEl = Math.cos(el);
+  return new THREE.Vector3(
+    Math.sin(az) * cosEl,
+    Math.sin(el),
+    Math.cos(az) * cosEl,
+  ).normalize();
+}
+
+function getSurfaceModeLabel() {
+  if (terrainStyle.reliefEnabled && terrainStyle.imageryEnabled) {
+    return `REMA relief + LIMA ${Math.round(terrainStyle.imageryOpacity * 100)}%`;
+  }
+  if (terrainStyle.reliefEnabled) return 'REMA relief';
+  if (terrainStyle.imageryEnabled) return 'LIMA only';
+  return 'neutral terrain';
+}
+
+function createTerrainMaterial(texture, level = 1) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uSunDirectionWorld: { value: getSunDirection() },
+      uAmbientStrength: { value: terrainStyle.ambientStrength },
+      uDiffuseStrength: { value: terrainStyle.diffuseStrength },
+      uSlopeAccentStrength: { value: terrainStyle.slopeAccentStrength },
+      uReliefEnabled: { value: terrainStyle.reliefEnabled ? 1.0 : 0.0 },
+      uImageryEnabled: { value: terrainStyle.imageryEnabled ? 1.0 : 0.0 },
+      uImageryOpacity: { value: terrainStyle.imageryOpacity },
+      uImagery: { value: texture },
+      uHasImagery: { value: texture ? 1.0 : 0.0 },
+    },
+    vertexShader: `
+      uniform vec3 uSunDirectionWorld;
+      varying vec2 vUv;
+      varying vec3 vNormalView;
+      varying vec3 vSunView;
+      varying vec3 vUpView;
+      varying float vElevation;
+
+      void main() {
+        vUv = uv;
+        vNormalView = normalize(normalMatrix * normal);
+        vSunView = normalize(mat3(viewMatrix) * uSunDirectionWorld);
+        vUpView = normalize(mat3(viewMatrix) * vec3(0.0, 1.0, 0.0));
+
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vElevation = worldPosition.y;
+        gl_Position = projectionMatrix * viewMatrix * worldPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform float uAmbientStrength;
+      uniform float uDiffuseStrength;
+      uniform float uSlopeAccentStrength;
+      uniform float uReliefEnabled;
+      uniform float uImageryEnabled;
+      uniform float uImageryOpacity;
+      uniform sampler2D uImagery;
+      uniform float uHasImagery;
+
+      varying vec2 vUv;
+      varying vec3 vNormalView;
+      varying vec3 vSunView;
+      varying vec3 vUpView;
+      varying float vElevation;
+
+      void main() {
+        vec3 N = normalize(vNormalView);
+        vec3 L = normalize(vSunView);
+        vec3 U = normalize(vUpView);
+
+        float lambert = max(dot(N, L), 0.0);
+        float wrapped = clamp(lambert * 0.82 + 0.18, 0.0, 1.0);
+        float slope = 1.0 - clamp(abs(dot(N, U)), 0.0, 1.0);
+
+        float reliefLight = uAmbientStrength + uDiffuseStrength * wrapped;
+        float elevationTone = clamp(vElevation / 3200.0, 0.0, 1.0);
+        vec3 iceBase = mix(vec3(0.78, 0.82, 0.87), vec3(0.94, 0.96, 0.99), elevationTone * 0.22 + 0.34);
+        vec3 reliefColor = iceBase * reliefLight;
+        reliefColor -= vec3(uSlopeAccentStrength * pow(slope, 0.72));
+        reliefColor = clamp(reliefColor, 0.035, 1.0);
+
+        vec3 finalColor = reliefColor;
+
+        if (uHasImagery > 0.5 && uImageryEnabled > 0.5) {
+          vec3 imagery = texture2D(uImagery, vUv).rgb;
+          vec3 shadedImagery = imagery * (0.70 + 0.48 * wrapped);
+          if (uReliefEnabled > 0.5) {
+            finalColor = mix(reliefColor, shadedImagery, uImageryOpacity);
+          } else {
+            finalColor = imagery;
+          }
+        } else if (uReliefEnabled < 0.5) {
+          finalColor = vec3(0.72, 0.75, 0.79);
+        }
+
+        gl_FragColor = vec4(finalColor, 1.0);
+      }
+    `,
+    side: THREE.DoubleSide,
+    wireframe: wireframeToggleEl.checked,
+    polygonOffset: level === 0,
+    polygonOffsetFactor: level === 0 ? 1 : 0,
+    polygonOffsetUnits: level === 0 ? 1 : 0,
+  });
+  material.userData.openAntarcticaTerrain = true;
+  return material;
+}
+
+function applyMaterialControls(mesh, texture) {
+  const material = mesh.material;
+  if (material?.userData?.openAntarcticaTerrain && material.uniforms) {
+    material.uniforms.uSunDirectionWorld.value.copy(getSunDirection());
+    material.uniforms.uAmbientStrength.value = terrainStyle.ambientStrength;
+    material.uniforms.uDiffuseStrength.value = terrainStyle.diffuseStrength;
+    material.uniforms.uSlopeAccentStrength.value = terrainStyle.slopeAccentStrength;
+    material.uniforms.uReliefEnabled.value = terrainStyle.reliefEnabled ? 1.0 : 0.0;
+    material.uniforms.uImageryEnabled.value = terrainStyle.imageryEnabled ? 1.0 : 0.0;
+    material.uniforms.uImageryOpacity.value = terrainStyle.imageryOpacity;
+    material.uniforms.uImagery.value = texture;
+    material.uniforms.uHasImagery.value = texture ? 1.0 : 0.0;
+  }
+  material.wireframe = wireframeToggleEl.checked;
+  material.needsUpdate = true;
+  mesh.scale.y = Number(exaggerationEl.value);
+}
+
+function updateAllTerrainMaterials() {
+  forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
+  if (imageryBlendControlEl) {
+    imageryBlendControlEl.style.opacity = terrainStyle.imageryEnabled ? '1' : '0.5';
+  }
+  lodDirty = true;
+  requestRender();
+}
+
+function forEachTerrain(callback) {
+  if (legacyTerrain) callback(legacyTerrain, legacyTexture);
+  for (const state of tileCache.values()) {
+    if (state.ready) callback(state.mesh, state.texture);
+  }
+}
+
 function isRootKey(key) {
   return key.startsWith('0/');
 }
@@ -107,21 +262,6 @@ function setDefaultCamera(spanX, spanZ, relief) {
   );
   defaultCamera = { position, target };
   resetView();
-}
-
-function applyMaterialControls(mesh, texture) {
-  mesh.material.map = textureToggleEl.checked ? texture : null;
-  mesh.material.color.set(textureToggleEl.checked ? 0xffffff : 0xcfd6df);
-  mesh.material.wireframe = wireframeToggleEl.checked;
-  mesh.material.needsUpdate = true;
-  mesh.scale.y = Number(exaggerationEl.value);
-}
-
-function forEachTerrain(callback) {
-  if (legacyTerrain) callback(legacyTerrain, legacyTexture);
-  for (const state of tileCache.values()) {
-    if (state.ready) callback(state.mesh, state.texture);
-  }
 }
 
 function buildSharedTopology(samples) {
@@ -318,17 +458,7 @@ function ensureTile(level, x, y, priority = 0) {
     loadedTexture.colorSpace = THREE.SRGBColorSpace;
     loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
 
-    const material = new THREE.MeshStandardMaterial({
-      map: loadedTexture,
-      color: 0xffffff,
-      roughness: 1,
-      metalness: 0,
-      side: THREE.DoubleSide,
-      polygonOffset: level === 0,
-      polygonOffsetFactor: level === 0 ? 1 : 0,
-      polygonOffsetUnits: level === 0 ? 1 : 0,
-    });
-
+    const material = createTerrainMaterial(loadedTexture, level);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(bounds.centerX, 0, bounds.centerZ);
     mesh.visible = false;
@@ -470,7 +600,7 @@ function updateStatus(targetLevel, renderKeys, nextKeys) {
   const renderReady = renderKeys.filter((key) => tileCache.get(key)?.ready).length;
   const shownCount = [...tileCache.values()].filter((state) => state.ready && state.mesh?.visible).length;
   setStatus(
-    `REMA ${RESOLUTION} + LIMA · target LOD ${targetLevel}/${lodMeta.lod.maxLevel}` +
+    `${getSurfaceModeLabel()} · REMA ${RESOLUTION} · target LOD ${targetLevel}/${lodMeta.lod.maxLevel}` +
     ` · shown ${currentRenderLevel}` +
     ` · surface ${renderReady}/${renderKeys.length}` +
     ` · ${shownCount} drawn · ${readyCount} cached` +
@@ -490,8 +620,8 @@ function updateLOD() {
   if (currentRenderLevel > targetLevel) currentRenderLevel = targetLevel;
 
   let renderKeys = visibleTileKeys(currentRenderLevel);
-  let nextLevel = currentRenderLevel < targetLevel ? currentRenderLevel + 1 : null;
-  let nextKeys = nextLevel === null ? [] : visibleTileKeys(nextLevel);
+  const nextLevel = currentRenderLevel < targetLevel ? currentRenderLevel + 1 : null;
+  const nextKeys = nextLevel === null ? [] : visibleTileKeys(nextLevel);
 
   const roots = rootKeys();
   currentWantedKeys = new Set([...roots, ...renderKeys, ...nextKeys]);
@@ -543,6 +673,7 @@ async function loadLODTerrain(metaResponse) {
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
+    `surface: native REMA relief; LIMA optional blend`,
     `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
     `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
     `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
@@ -619,13 +750,7 @@ async function loadLegacyTerrain() {
   loadedTexture.colorSpace = THREE.SRGBColorSpace;
   loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
   legacyTexture = loadedTexture;
-  legacyTerrain = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    map: loadedTexture,
-    color: 0xffffff,
-    roughness: 1,
-    metalness: 0,
-    side: THREE.DoubleSide,
-  }));
+  legacyTerrain = new THREE.Mesh(geometry, createTerrainMaterial(loadedTexture, 1));
   terrainGroup.add(legacyTerrain);
   applyMaterialControls(legacyTerrain, legacyTexture);
   setDefaultCamera(spanX, spanZ, maxHeight - minHeight);
@@ -635,9 +760,10 @@ async function loadLegacyTerrain() {
     `${meta.width} × ${meta.height} legacy terrain mesh`,
     `${(spanX / 1000).toFixed(1)} × ${(spanZ / 1000).toFixed(1)} km`,
     `${minHeight.toFixed(0)}–${maxHeight.toFixed(0)} m source elevation`,
+    'surface: native REMA relief; LIMA optional blend',
     '<em>Build LOD assets for higher detail.</em>',
   ].join('<br>');
-  setStatus(`REMA ${RESOLUTION} + LIMA · legacy mesh`);
+  setStatus(`${getSurfaceModeLabel()} · REMA ${RESOLUTION} · legacy mesh`);
   requestRender();
 }
 
@@ -650,6 +776,12 @@ async function loadTerrain() {
   }
 }
 
+reliefToggleEl.checked = terrainStyle.reliefEnabled;
+textureToggleEl.checked = terrainStyle.imageryEnabled;
+imageryOpacityEl.value = String(Math.round(terrainStyle.imageryOpacity * 100));
+imageryOpacityValueEl.textContent = `${Math.round(terrainStyle.imageryOpacity * 100)}%`;
+imageryBlendControlEl.style.opacity = terrainStyle.imageryEnabled ? '1' : '0.5';
+
 exaggerationEl.addEventListener('input', () => {
   const value = Number(exaggerationEl.value);
   exaggerationValueEl.textContent = `${value.toFixed(1)}×`;
@@ -658,14 +790,24 @@ exaggerationEl.addEventListener('input', () => {
   requestRender();
 });
 
+reliefToggleEl.addEventListener('change', () => {
+  terrainStyle.reliefEnabled = reliefToggleEl.checked;
+  updateAllTerrainMaterials();
+});
+
 textureToggleEl.addEventListener('change', () => {
-  forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
-  requestRender();
+  terrainStyle.imageryEnabled = textureToggleEl.checked;
+  updateAllTerrainMaterials();
+});
+
+imageryOpacityEl.addEventListener('input', () => {
+  terrainStyle.imageryOpacity = Number(imageryOpacityEl.value) / 100;
+  imageryOpacityValueEl.textContent = `${imageryOpacityEl.value}%`;
+  updateAllTerrainMaterials();
 });
 
 wireframeToggleEl.addEventListener('change', () => {
-  forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
-  requestRender();
+  updateAllTerrainMaterials();
 });
 
 resetViewEl.addEventListener('click', resetView);
@@ -694,8 +836,6 @@ function animate(now = 0) {
     updateLOD();
   }
 
-  // Keep requestAnimationFrame alive for responsive controls, but do not submit a
-  // new WebGL frame unless the camera, terrain state, or UI actually changed.
   if (renderDirty && now - lastRenderTime >= MIN_RENDER_INTERVAL_MS) {
     renderer.render(scene, camera);
     lastRenderTime = now;
