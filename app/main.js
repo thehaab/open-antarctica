@@ -61,14 +61,12 @@ const projectionView = new THREE.Matrix4();
 const boxScratch = new THREE.Box3();
 
 const MAX_CONCURRENT_LOADS = 6;
-const MAX_READY_TILES = RESOLUTION === '2m' ? 144 : 96;
-const MAX_VISIBLE_LEAVES_MOVING = RESOLUTION === '2m' ? 52 : 64;
-const MAX_VISIBLE_LEAVES_SETTLED = RESOLUTION === '2m' ? 96 : 80;
-const MAX_REFINE_GROUPS_MOVING = RESOLUTION === '2m' ? 6 : 8;
-const MAX_REFINE_GROUPS_SETTLED = RESOLUTION === '2m' ? 12 : 10;
+const MAX_READY_TILES = RESOLUTION === '2m' ? 160 : 96;
+const MAX_TARGET_VISIBLE_MOVING = RESOLUTION === '2m' ? 60 : 72;
+const MAX_TARGET_VISIBLE_SETTLED = RESOLUTION === '2m' ? 144 : 96;
 const SETTLE_REFINEMENT_DELAY_MS = 650;
-const TARGET_PIXEL_SPACING_MOVING = RESOLUTION === '2m' ? 1.35 : 1.6;
-const TARGET_PIXEL_SPACING_SETTLED = RESOLUTION === '2m' ? 0.75 : 1.0;
+const TARGET_PIXEL_SPACING_MOVING = RESOLUTION === '2m' ? 1.25 : 1.5;
+const TARGET_PIXEL_SPACING_SETTLED = RESOLUTION === '2m' ? 0.65 : 0.9;
 const LOD_UPDATE_INTERVAL_MS = 90;
 const MAX_RENDER_FPS = RESOLUTION === '2m' ? 45 : 60;
 const MIN_RENDER_INTERVAL_MS = 1000 / MAX_RENDER_FPS;
@@ -82,6 +80,7 @@ let sharedIndex = null;
 let legacyTerrain = null;
 let legacyTexture = null;
 let lastStatus = '';
+let currentRenderLevel = 0;
 let currentWantedKeys = new Set();
 let lodDirty = true;
 let lastLodUpdate = 0;
@@ -187,11 +186,15 @@ function createTerrainMaterial(texture, level = 1) {
         reliefColor = clamp(reliefColor, 0.025, 0.94);
 
         vec3 finalColor = reliefColor;
+
         if (uHasImagery > 0.5 && uImageryEnabled > 0.5) {
           vec3 imagery = texture2D(uImagery, vUv).rgb;
           vec3 shadedImagery = imagery * (0.58 + 0.46 * wrapped);
-          if (uReliefEnabled > 0.5) finalColor = mix(reliefColor, shadedImagery, uImageryOpacity);
-          else finalColor = imagery;
+          if (uReliefEnabled > 0.5) {
+            finalColor = mix(reliefColor, shadedImagery, uImageryOpacity);
+          } else {
+            finalColor = imagery;
+          }
         } else if (uReliefEnabled < 0.5) {
           finalColor = vec3(0.66, 0.70, 0.75);
         }
@@ -229,18 +232,20 @@ function applyMaterialControls(mesh, texture) {
   mesh.scale.y = Number(exaggerationEl.value);
 }
 
+function updateAllTerrainMaterials() {
+  forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
+  if (imageryBlendControlEl) {
+    imageryBlendControlEl.style.opacity = terrainStyle.imageryEnabled ? '1' : '0.5';
+  }
+  lodDirty = true;
+  requestRender();
+}
+
 function forEachTerrain(callback) {
   if (legacyTerrain) callback(legacyTerrain, legacyTexture);
   for (const state of tileCache.values()) {
     if (state.ready) callback(state.mesh, state.texture);
   }
-}
-
-function updateAllTerrainMaterials() {
-  forEachTerrain((mesh, texture) => applyMaterialControls(mesh, texture));
-  if (imageryBlendControlEl) imageryBlendControlEl.style.opacity = terrainStyle.imageryEnabled ? '1' : '0.5';
-  lodDirty = true;
-  requestRender();
 }
 
 function isRootKey(key) {
@@ -252,15 +257,17 @@ function resetView() {
   camera.position.copy(defaultCamera.position);
   controls.target.copy(defaultCamera.target);
   controls.update();
-  lastInteractionTime = performance.now();
-  settleRefinementApplied = false;
   lodDirty = true;
   requestRender();
 }
 
 function setDefaultCamera(spanX, spanZ, relief) {
   const target = new THREE.Vector3(0, Math.max(relief * 0.35, 400), 0);
-  const position = new THREE.Vector3(spanX * 0.16, Math.max(spanX * 0.26, 12000), spanZ * 1.7);
+  const position = new THREE.Vector3(
+    spanX * 0.16,
+    Math.max(spanX * 0.26, 12000),
+    spanZ * 1.7,
+  );
   defaultCamera = { position, target };
   resetView();
 }
@@ -287,10 +294,15 @@ function buildSharedTopology(samples) {
       const b = a + 1;
       const c = a + samples;
       const d = c + 1;
-      indices[k++] = a; indices[k++] = c; indices[k++] = b;
-      indices[k++] = b; indices[k++] = c; indices[k++] = d;
+      indices[k++] = a;
+      indices[k++] = c;
+      indices[k++] = b;
+      indices[k++] = b;
+      indices[k++] = c;
+      indices[k++] = d;
     }
   }
+
   sharedUV = new THREE.BufferAttribute(uv, 2);
   sharedIndex = new THREE.BufferAttribute(indices, 1);
 }
@@ -304,22 +316,11 @@ function parseTileKey(key) {
   return { level, x, y };
 }
 
-function childKeys(level, x, y) {
-  const next = level + 1;
-  const baseX = x * 2;
-  const baseY = y * 2;
-  return [
-    tileKey(next, baseX, baseY),
-    tileKey(next, baseX + 1, baseY),
-    tileKey(next, baseX, baseY + 1),
-    tileKey(next, baseX + 1, baseY + 1),
-  ];
-}
-
 function tileBounds(level, x, y) {
   const key = tileKey(level, x, y);
   const cached = boundsCache.get(key);
   if (cached) return cached;
+
   const scale = 2 ** level;
   const nx = lodMeta.lod.rootTilesX * scale;
   const ny = lodMeta.lod.rootTilesY * scale;
@@ -340,7 +341,10 @@ function tileBounds(level, x, y) {
 }
 
 function tileUrl(pattern, level, x, y) {
-  return lodBase + pattern.replace('{level}', level).replace('{x}', x).replace('{y}', y);
+  return lodBase + pattern
+    .replace('{level}', level)
+    .replace('{x}', x)
+    .replace('{y}', y);
 }
 
 function enqueueLoad(key, task, priority = 0, onCancel = null) {
@@ -369,36 +373,18 @@ function pumpLoadQueue() {
       entry.resolve(null);
       continue;
     }
-    activeLoads += 1;
-    Promise.resolve().then(entry.task).then(entry.resolve, entry.reject).finally(() => {
-      activeLoads -= 1;
-      lodDirty = true;
-      requestRender();
-      pumpLoadQueue();
-    });
-  }
-}
 
-async function ensureTileTexture(state) {
-  if (!state?.ready || state.texture || state.texturePromise || !state.textureUrl) return state?.texturePromise;
-  state.texturePromise = textureLoader.loadAsync(state.textureUrl).then((loadedTexture) => {
-    if (tileCache.get(state.key) !== state || !state.ready) {
-      loadedTexture.dispose();
-      return null;
-    }
-    loadedTexture.colorSpace = THREE.SRGBColorSpace;
-    loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
-    state.texture = loadedTexture;
-    state.texturePromise = null;
-    applyMaterialControls(state.mesh, state.texture);
-    requestRender();
-    return loadedTexture;
-  }).catch((error) => {
-    state.texturePromise = null;
-    console.error(`Unable to load imagery for ${state.key}`, error);
-    return null;
-  });
-  return state.texturePromise;
+    activeLoads += 1;
+    Promise.resolve()
+      .then(entry.task)
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        activeLoads -= 1;
+        lodDirty = true;
+        requestRender();
+        pumpLoadQueue();
+      });
+  }
 }
 
 function ensureTile(level, x, y, priority = 0) {
@@ -410,13 +396,14 @@ function ensureTile(level, x, y, priority = 0) {
   }
 
   const state = {
-    key, level, x, y,
+    key,
+    level,
+    x,
+    y,
     ready: false,
     loading: true,
     mesh: null,
     texture: null,
-    texturePromise: null,
-    textureUrl: tileUrl(lodMeta.lod.texturePattern, level, x, y),
     promise: null,
     lastUsed: performance.now(),
   };
@@ -429,9 +416,16 @@ function ensureTile(level, x, y, priority = 0) {
 
   state.promise = enqueueLoad(key, async () => {
     const heightUrl = tileUrl(lodMeta.lod.heightPattern, level, x, y);
-    const heightResponse = await fetch(heightUrl);
+    const textureUrl = tileUrl(lodMeta.lod.texturePattern, level, x, y);
+    const [heightResponse, loadedTexture] = await Promise.all([
+      fetch(heightUrl),
+      textureLoader.loadAsync(textureUrl),
+    ]);
+
     if (!heightResponse.ok) throw new Error(`Unable to load terrain tile ${key}`);
+
     if (!isRootKey(key) && !currentWantedKeys.has(key)) {
+      loadedTexture.dispose();
       cancel();
       return null;
     }
@@ -439,12 +433,16 @@ function ensureTile(level, x, y, priority = 0) {
     const heights = new Float32Array(await heightResponse.arrayBuffer());
     const samples = lodMeta.lod.samples;
     const expected = samples * samples;
-    if (heights.length !== expected) throw new Error(`Terrain tile ${key} has ${heights.length} samples; expected ${expected}`);
+    if (heights.length !== expected) {
+      loadedTexture.dispose();
+      throw new Error(`Terrain tile ${key} has ${heights.length} samples; expected ${expected}`);
+    }
 
     const bounds = tileBounds(level, x, y);
     const positions = new Float32Array(expected * 3);
     const minHeight = lodMeta.elevation.min;
     let p = 0;
+
     for (let row = 0; row < samples; row++) {
       const v = row / (samples - 1);
       const z = (v - 0.5) * bounds.depth;
@@ -465,7 +463,10 @@ function ensureTile(level, x, y, priority = 0) {
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
 
-    const material = createTerrainMaterial(null, level);
+    loadedTexture.colorSpace = THREE.SRGBColorSpace;
+    loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
+
+    const material = createTerrainMaterial(loadedTexture, level);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(bounds.centerX, 0, bounds.centerZ);
     mesh.visible = false;
@@ -473,11 +474,11 @@ function ensureTile(level, x, y, priority = 0) {
     terrainGroup.add(mesh);
 
     state.mesh = mesh;
+    state.texture = loadedTexture;
     state.ready = true;
     state.loading = false;
     state.lastUsed = performance.now();
-    applyMaterialControls(mesh, null);
-    if (terrainStyle.imageryEnabled) ensureTileTexture(state);
+    applyMaterialControls(mesh, loadedTexture);
     lodDirty = true;
     requestRender();
     return state;
@@ -485,6 +486,7 @@ function ensureTile(level, x, y, priority = 0) {
     if (tileCache.get(key) === state) tileCache.delete(key);
     throw error;
   });
+
   return state.promise;
 }
 
@@ -498,8 +500,16 @@ function setTileBox(level, x, y) {
   const bounds = tileBounds(level, x, y);
   const exaggeration = Number(exaggerationEl.value);
   const relief = (lodMeta.elevation.max - lodMeta.elevation.min) * exaggeration;
-  boxScratch.min.set(bounds.centerX - bounds.width * 0.5, 0, bounds.centerZ - bounds.depth * 0.5);
-  boxScratch.max.set(bounds.centerX + bounds.width * 0.5, relief, bounds.centerZ + bounds.depth * 0.5);
+  boxScratch.min.set(
+    bounds.centerX - bounds.width * 0.5,
+    0,
+    bounds.centerZ - bounds.depth * 0.5,
+  );
+  boxScratch.max.set(
+    bounds.centerX + bounds.width * 0.5,
+    relief,
+    bounds.centerZ + bounds.depth * 0.5,
+  );
   return boxScratch;
 }
 
@@ -511,18 +521,57 @@ function tileDistanceToCamera(level, x, y) {
   return Math.max(setTileBox(level, x, y).distanceToPoint(camera.position), 250);
 }
 
-function projectedTileSpacing(level, x, y, focalPixels) {
-  const bounds = tileBounds(level, x, y);
-  const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
-  return spacing * focalPixels / tileDistanceToCamera(level, x, y);
-}
-
-function rootKeys() {
+function visibleTileKeys(level) {
+  const scale = 2 ** level;
+  const nx = lodMeta.lod.rootTilesX * scale;
+  const ny = lodMeta.lod.rootTilesY * scale;
   const keys = [];
-  for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
-    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) keys.push(tileKey(0, x, y));
+  for (let y = 0; y < ny; y++) {
+    for (let x = 0; x < nx; x++) {
+      if (tileIsVisible(level, x, y)) keys.push(tileKey(level, x, y));
+    }
   }
   return keys;
+}
+
+function chooseTargetLevel() {
+  const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
+  const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
+  const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
+  const visibleBudget = settled ? MAX_TARGET_VISIBLE_SETTLED : MAX_TARGET_VISIBLE_MOVING;
+  const targetPixelSpacing = settled ? TARGET_PIXEL_SPACING_SETTLED : TARGET_PIXEL_SPACING_MOVING;
+
+  let finestBudgetLevel = 0;
+  let finestBudgetKeys = visibleTileKeys(0);
+
+  for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
+    const keys = visibleTileKeys(level);
+    if (keys.length === 0) continue;
+    if (keys.length > visibleBudget) break;
+
+    finestBudgetLevel = level;
+    finestBudgetKeys = keys;
+
+    const bounds = tileBounds(level, 0, 0);
+    const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
+    let nearestDistance = Infinity;
+
+    for (const key of keys) {
+      const { x, y } = parseTileKey(key);
+      nearestDistance = Math.min(nearestDistance, tileDistanceToCamera(level, x, y));
+    }
+
+    if (!Number.isFinite(nearestDistance)) {
+      nearestDistance = Math.max(camera.position.distanceTo(controls.target), 250);
+    }
+
+    const projectedPixels = spacing * focalPixels / nearestDistance;
+    if (projectedPixels <= targetPixelSpacing) {
+      return { level, keys };
+    }
+  }
+
+  return { level: finestBudgetLevel, keys: finestBudgetKeys };
 }
 
 function allReady(keys) {
@@ -539,62 +588,12 @@ function requestKeys(keys, priority) {
   }
 }
 
-function buildMixedSelection() {
-  const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
-  const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
-  const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
-  const pixelTarget = settled ? TARGET_PIXEL_SPACING_SETTLED : TARGET_PIXEL_SPACING_MOVING;
-  const leafBudget = settled ? MAX_VISIBLE_LEAVES_SETTLED : MAX_VISIBLE_LEAVES_MOVING;
-  const groupBudget = settled ? MAX_REFINE_GROUPS_SETTLED : MAX_REFINE_GROUPS_MOVING;
-
-  const roots = rootKeys();
-  const visibleRoots = roots.filter((key) => {
-    const { level, x, y } = parseTileKey(key);
-    return tileIsVisible(level, x, y);
-  });
-  const renderKeys = [];
-  const wanted = new Set(roots);
-  const requestGroups = [];
-  let leafBudgetRemaining = Math.max(0, leafBudget - visibleRoots.length);
-
-  function visit(key) {
-    const { level, x, y } = parseTileKey(key);
-    if (!tileIsVisible(level, x, y)) return;
-    const state = tileCache.get(key);
-    if (!state?.ready) return;
-    state.lastUsed = performance.now();
-    wanted.add(key);
-
-    const needsMoreDetail = level < lodMeta.lod.maxLevel && projectedTileSpacing(level, x, y, focalPixels) > pixelTarget;
-    if (needsMoreDetail) {
-      const children = childKeys(level, x, y);
-      const visibleChildren = children.filter((childKey) => {
-        const child = parseTileKey(childKey);
-        return tileIsVisible(child.level, child.x, child.y);
-      });
-      const refinementCost = Math.max(0, visibleChildren.length - 1);
-      if (visibleChildren.length > 0 && refinementCost <= leafBudgetRemaining) {
-        if (allReady(children)) {
-          leafBudgetRemaining -= refinementCost;
-          for (const childKey of visibleChildren) visit(childKey);
-          return;
-        }
-        requestGroups.push({ children, priority: 1000000 - tileDistanceToCamera(level, x, y) + level * 10000 });
-      }
-    }
-    renderKeys.push(key);
+function rootKeys() {
+  const keys = [];
+  for (let y = 0; y < lodMeta.lod.rootTilesY; y++) {
+    for (let x = 0; x < lodMeta.lod.rootTilesX; x++) keys.push(tileKey(0, x, y));
   }
-
-  visibleRoots.sort((a, b) => {
-    const ta = parseTileKey(a);
-    const tb = parseTileKey(b);
-    return tileDistanceToCamera(ta.level, ta.x, ta.y) - tileDistanceToCamera(tb.level, tb.x, tb.y);
-  }).forEach(visit);
-
-  requestGroups.sort((a, b) => b.priority - a.priority);
-  const selectedGroups = requestGroups.slice(0, groupBudget);
-  selectedGroups.forEach((group) => group.children.forEach((key) => wanted.add(key)));
-  return { renderKeys, wanted, selectedGroups, settled, pixelTarget, leafBudget };
+  return keys;
 }
 
 function disposeTile(state) {
@@ -603,14 +602,17 @@ function disposeTile(state) {
   state.mesh.geometry.dispose();
   state.texture?.dispose();
   state.mesh.material.dispose();
-  state.ready = false;
   if (tileCache.get(state.key) === state) tileCache.delete(state.key);
 }
 
 function evictTiles() {
   const ready = [...tileCache.values()].filter((state) => state.ready);
   if (ready.length <= MAX_READY_TILES) return;
-  const candidates = ready.filter((state) => state.level !== 0 && !currentWantedKeys.has(state.key) && !state.mesh.visible).sort((a, b) => a.lastUsed - b.lastUsed);
+
+  const candidates = ready
+    .filter((state) => state.level !== 0 && !currentWantedKeys.has(state.key) && !state.mesh.visible)
+    .sort((a, b) => a.lastUsed - b.lastUsed);
+
   let readyCount = ready.length;
   for (const state of candidates) {
     if (readyCount <= MAX_READY_TILES) break;
@@ -623,50 +625,73 @@ function updateVisibility(renderKeys) {
   const renderSet = new Set(renderKeys);
   for (const state of tileCache.values()) {
     if (!state.ready || !state.mesh) continue;
-    const shouldShow = state.level === 0 || renderSet.has(state.key);
-    state.mesh.visible = shouldShow;
-    if (shouldShow && terrainStyle.imageryEnabled && !state.texture) ensureTileTexture(state);
+
+    if (state.level === 0) {
+      state.mesh.visible = true;
+      continue;
+    }
+
+    state.mesh.visible = state.level === currentRenderLevel && renderSet.has(state.key);
   }
 }
 
-function updateStatus(selection) {
+function updateStatus(targetLevel, renderKeys, nextKeys) {
   const readyCount = [...tileCache.values()].filter((state) => state.ready).length;
-  const shownStates = [...tileCache.values()].filter((state) => state.ready && state.mesh?.visible);
-  const leafLevels = selection.renderKeys.map((key) => parseTileKey(key).level);
-  const minLevel = leafLevels.length ? Math.min(...leafLevels) : 0;
-  const maxLevel = leafLevels.length ? Math.max(...leafLevels) : 0;
-  const imageryReady = shownStates.filter((state) => state.texture).length;
+  const renderReady = renderKeys.filter((key) => tileCache.get(key)?.ready).length;
+  const shownCount = [...tileCache.values()].filter((state) => state.ready && state.mesh?.visible).length;
+  const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
   setStatus(
-    `${getSurfaceModeLabel()} · REMA ${RESOLUTION}` +
-    ` · mixed LOD ${minLevel}–${maxLevel}/${lodMeta.lod.maxLevel}` +
-    ` · ${selection.renderKeys.length} leaves` +
-    ` · ${shownStates.length} drawn · ${readyCount} cached` +
-    (selection.settled ? ' · settled refine' : ' · moving') +
-    (selection.selectedGroups.length ? ` · refining ${selection.selectedGroups.length} groups` : '') +
+    `${getSurfaceModeLabel()} · REMA ${RESOLUTION} · target LOD ${targetLevel}/${lodMeta.lod.maxLevel}` +
+    ` · shown ${currentRenderLevel}` +
+    ` · surface ${renderReady}/${renderKeys.length}` +
+    ` · ${shownCount} drawn · ${readyCount} cached` +
+    (settled ? ' · settled refine' : ' · moving') +
     (activeLoads ? ` · ${activeLoads} active` : '') +
     (loadQueue.length ? ` · ${loadQueue.length} queued` : '') +
-    (terrainStyle.imageryEnabled ? ` · imagery ${imageryReady}/${shownStates.length}` : ''),
+    (nextKeys.length ? ` · warming LOD ${Math.min(currentRenderLevel + 1, lodMeta.lod.maxLevel)}` : ''),
   );
 }
 
 function updateLOD() {
   if (!lodMeta) return;
   updateFrustum();
-  const selection = buildMixedSelection();
-  currentWantedKeys = selection.wanted;
+
+  const target = chooseTargetLevel();
+  const targetLevel = target.level;
+
+  if (currentRenderLevel > targetLevel) currentRenderLevel = targetLevel;
+
+  let renderKeys = visibleTileKeys(currentRenderLevel);
+  const nextLevel = currentRenderLevel < targetLevel ? currentRenderLevel + 1 : null;
+  const nextKeys = nextLevel === null ? [] : visibleTileKeys(nextLevel);
+
+  const roots = rootKeys();
+  currentWantedKeys = new Set([...roots, ...renderKeys, ...nextKeys]);
   cancelStaleQueuedLoads();
-  for (const group of selection.selectedGroups) requestKeys(group.children, group.priority);
-  updateVisibility(selection.renderKeys);
+
+  requestKeys(renderKeys, 300);
+  if (nextKeys.length) requestKeys(nextKeys, 200);
+
+  let advanced = false;
+  if (nextLevel !== null && nextKeys.length > 0 && allReady(nextKeys)) {
+    currentRenderLevel = nextLevel;
+    renderKeys = nextKeys;
+    advanced = true;
+  }
+
+  updateVisibility(renderKeys);
   evictTiles();
-  updateStatus(selection);
+  updateStatus(targetLevel, renderKeys, nextKeys);
   requestRender();
-  lodDirty = false;
+
+  lodDirty = advanced && currentRenderLevel < targetLevel;
 }
 
 async function loadLODTerrain(metaResponse) {
   lodMeta = await metaResponse.json();
   lodBase = LOD_META_URL.slice(0, LOD_META_URL.lastIndexOf('/') + 1);
   buildSharedTopology(lodMeta.lod.samples);
+
   const roots = rootKeys();
   currentWantedKeys = new Set(roots);
   await Promise.all(roots.map((key) => {
@@ -678,6 +703,7 @@ async function loadLODTerrain(metaResponse) {
   const spanZ = lodMeta.extent.ymax - lodMeta.extent.ymin;
   const relief = lodMeta.elevation.max - lodMeta.elevation.min;
   setDefaultCamera(spanX, spanZ, relief);
+
   const finestX = lodMeta.lod.rootTilesX * (2 ** lodMeta.lod.maxLevel);
   const finestY = lodMeta.lod.rootTilesY * (2 ** lodMeta.lod.maxLevel);
   const effectiveX = spanX / finestX / (lodMeta.lod.samples - 1);
@@ -685,32 +711,38 @@ async function loadLODTerrain(metaResponse) {
 
   metaEl.innerHTML = [
     `<strong>${lodMeta.name}</strong>`,
-    `REMA ${lodMeta.resolution} · progressive mixed-LOD terrain · LOD 0–${lodMeta.lod.maxLevel}`,
+    `REMA ${lodMeta.resolution} · stable adaptive terrain · LOD 0–${lodMeta.lod.maxLevel}`,
     `${lodMeta.lod.samples} × ${lodMeta.lod.samples} samples/tile`,
     `finest sampling ~${effectiveX.toFixed(1)} × ${effectiveY.toFixed(1)} m`,
     `${lodMeta.elevation.min.toFixed(0)}–${lodMeta.elevation.max.toFixed(0)} m source elevation`,
-    `surface: native REMA relief; LIMA optional lazy blend`,
+    `surface: native REMA relief; LIMA optional blend`,
     `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
-    `visible leaves: ${MAX_VISIBLE_LEAVES_MOVING} moving · ${MAX_VISIBLE_LEAVES_SETTLED} settled`,
-    `refine groups/update: ${MAX_REFINE_GROUPS_MOVING} moving · ${MAX_REFINE_GROUPS_SETTLED} settled`,
+    `moving tile budget: ${MAX_TARGET_VISIBLE_MOVING} · settled refine budget: ${MAX_TARGET_VISIBLE_SETTLED}`,
     `LOD pixel target: ${TARGET_PIXEL_SPACING_MOVING.toFixed(2)} px moving · ${TARGET_PIXEL_SPACING_SETTLED.toFixed(2)} px settled`,
     `settled refinement delay: ${SETTLE_REFINEMENT_DELAY_MS} ms`,
-    `detail distance: per-tile nearest terrain`,
-    `complete 2×2 child groups replace parents; LOD 0 remains safety underlay`,
-    `LIMA textures load only when imagery is enabled`,
+    `LOD distance: nearest visible terrain`,
     `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
+    `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
   ].join('<br>');
+
+  currentRenderLevel = 0;
   lodDirty = true;
   requestRender();
 }
 
 async function loadLegacyTerrain() {
   const metaResponse = await fetch(LEGACY_META_URL);
-  if (!metaResponse.ok) throw new Error(`LOD assets are not built yet for ${RESOLUTION}. Run scripts/build_viewer_lod_assets.sh --resolution ${RESOLUTION}`);
+  if (!metaResponse.ok) {
+    throw new Error(`LOD assets are not built yet for ${RESOLUTION}. Run scripts/build_viewer_lod_assets.sh --resolution ${RESOLUTION}`);
+  }
   const meta = await metaResponse.json();
   const base = LEGACY_META_URL.slice(0, LEGACY_META_URL.lastIndexOf('/') + 1);
-  const [heightResponse, loadedTexture] = await Promise.all([fetch(base + meta.heightmap), textureLoader.loadAsync(base + meta.texture)]);
+  const [heightResponse, loadedTexture] = await Promise.all([
+    fetch(base + meta.heightmap),
+    textureLoader.loadAsync(base + meta.texture),
+  ]);
   if (!heightResponse.ok) throw new Error(`Unable to load ${meta.heightmap}`);
+
   const heights = new Float32Array(await heightResponse.arrayBuffer());
   const expected = meta.width * meta.height;
   if (heights.length !== expected) throw new Error('Legacy height grid has unexpected size');
@@ -760,6 +792,7 @@ async function loadLegacyTerrain() {
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
+
   loadedTexture.colorSpace = THREE.SRGBColorSpace;
   loadedTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
   legacyTexture = loadedTexture;
@@ -767,6 +800,7 @@ async function loadLegacyTerrain() {
   terrainGroup.add(legacyTerrain);
   applyMaterialControls(legacyTerrain, legacyTexture);
   setDefaultCamera(spanX, spanZ, maxHeight - minHeight);
+
   metaEl.innerHTML = [
     `<strong>${meta.name}</strong>`,
     `${meta.width} × ${meta.height} legacy terrain mesh`,
@@ -781,8 +815,11 @@ async function loadLegacyTerrain() {
 
 async function loadTerrain() {
   const lodResponse = await fetch(LOD_META_URL);
-  if (lodResponse.ok) await loadLODTerrain(lodResponse);
-  else await loadLegacyTerrain();
+  if (lodResponse.ok) {
+    await loadLODTerrain(lodResponse);
+  } else {
+    await loadLegacyTerrain();
+  }
 }
 
 reliefToggleEl.checked = terrainStyle.reliefEnabled;
@@ -807,11 +844,6 @@ reliefToggleEl.addEventListener('change', () => {
 textureToggleEl.addEventListener('change', () => {
   terrainStyle.imageryEnabled = textureToggleEl.checked;
   updateAllTerrainMaterials();
-  if (terrainStyle.imageryEnabled) {
-    for (const state of tileCache.values()) {
-      if (state.ready && state.mesh?.visible) ensureTileTexture(state);
-    }
-  }
 });
 
 imageryOpacityEl.addEventListener('input', () => {
@@ -820,7 +852,10 @@ imageryOpacityEl.addEventListener('input', () => {
   updateAllTerrainMaterials();
 });
 
-wireframeToggleEl.addEventListener('change', updateAllTerrainMaterials);
+wireframeToggleEl.addEventListener('change', () => {
+  updateAllTerrainMaterials();
+});
+
 resetViewEl.addEventListener('click', resetView);
 controls.addEventListener('change', () => {
   lastInteractionTime = performance.now();
@@ -847,19 +882,27 @@ function animate(now = 0) {
     if (lodMeta) lodDirty = true;
     requestRender();
   }
-  if (lodMeta && !settleRefinementApplied && now - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS) {
+
+  if (
+    lodMeta &&
+    !settleRefinementApplied &&
+    now - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS
+  ) {
     settleRefinementApplied = true;
     lodDirty = true;
   }
+
   if (lodMeta && lodDirty && now - lastLodUpdate >= LOD_UPDATE_INTERVAL_MS) {
     lastLodUpdate = now;
     updateLOD();
   }
+
   if (renderDirty && now - lastRenderTime >= MIN_RENDER_INTERVAL_MS) {
     renderer.render(scene, camera);
     lastRenderTime = now;
     renderDirty = false;
   }
+
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
