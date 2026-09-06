@@ -1,10 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// main.js intentionally owns the terrain engine internals. Bootstrap exposes only
-// stable scene/camera/renderer/controls references to optional science overlays.
-// Capture the exact terrain Group when main.js adds it to the scene; science
-// layers should never have to guess which scene child is the REMA surface.
+// Bridge the stable viewer objects out of main.js without changing the known-good
+// terrain renderer. The first THREE.Group added by main.js is its REMA terrain group.
 const originalRender = THREE.WebGLRenderer.prototype.render;
 const originalControlsUpdate = OrbitControls.prototype.update;
 const originalSceneAdd = THREE.Scene.prototype.add;
@@ -56,4 +54,21 @@ THREE.WebGLRenderer.prototype.render = function openAntarcticaRenderBridge(scene
 
 await import('./main.js?v=20260906-uniform-lod');
 await import('./nasa-time.js?v=20260906-atl11-series-v3');
-await import('./atl06-overlay.js?v=20260906-atl06-lines-v5');
+
+try {
+  await import('./atl06-overlay.js?v=20260906-atl06-core-v6');
+} catch (error) {
+  console.error('ATL06 overlay module failed to load:', error);
+  const meta = document.getElementById('atl06Meta');
+  const toggle = document.getElementById('atl06Toggle');
+  const focus = document.getElementById('atl06Focus');
+  if (toggle) {
+    toggle.checked = false;
+    toggle.disabled = true;
+  }
+  if (focus) focus.disabled = true;
+  if (meta) {
+    meta.innerHTML = '<strong>ICESat-2 ATL06 science overlay</strong><br>' +
+      '<strong>Module load error:</strong> ' + String(error?.message || error);
+  }
+}
