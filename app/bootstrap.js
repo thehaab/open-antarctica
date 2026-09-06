@@ -83,13 +83,33 @@ function showAtl06ModuleError(error) {
   }
 }
 
-// Register the science-layer listener before main.js creates the viewer.
+function showCoverageModuleError(error) {
+  console.error('ATL06 coverage module failed to load:', error);
+  const meta = document.getElementById('atl06CoverageMeta');
+  const toggle = document.getElementById('atl06CoverageToggle');
+  if (toggle) {
+    toggle.checked = false;
+    toggle.disabled = true;
+  }
+  if (meta) {
+    meta.innerHTML = '<strong>ICESat-2 mission coverage</strong><br>' +
+      '<strong>Module load error:</strong> ' + String(error?.message || error);
+  }
+}
+
+// Register science-layer listeners before main.js creates the viewer.
 const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-series-v9')
   .catch((error) => {
     showAtl06ModuleError(error);
     return null;
   });
 
+const coverageModulePromise = import('./atl06-coverage.js?v=20260906-atl06-coverage-v10')
+  .catch((error) => {
+    showCoverageModuleError(error);
+    return null;
+  });
+
 await import('./main.js?v=20260906-uniform-lod');
 await import('./nasa-time.js?v=20260906-atl11-series-v3');
-await atl06ModulePromise;
+await Promise.all([atl06ModulePromise, coverageModulePromise]);
