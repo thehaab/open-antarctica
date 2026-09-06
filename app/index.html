@@ -48,7 +48,7 @@
 
     <label class="check"><input id="wireframeToggle" type="checkbox"> Wireframe</label>
     <label class="check"><input id="atl06Toggle" type="checkbox" checked> ICESat-2 ATL06 overlay</label>
-    <button id="atl06Focus" type="button">Focus ATL06 pass</button>
+    <button id="atl06Focus" type="button" disabled>Focus ATL06 pass</button>
 
     <button id="resetView" type="button">Reset view</button>
 
@@ -59,7 +59,7 @@
     </div>
     <div class="meta" id="atl06Meta">
       <strong>ICESat-2 ATL06 science overlay</strong><br>
-      Comparison data: checking…
+      Overlay module: loading…
     </div>
     <div class="provenance">
       Terrain: PGC REMA v2<br>
@@ -72,6 +72,6 @@
 
   <div class="hint">Drag to orbit · wheel to zoom · right-drag to pan</div>
 
-  <script type="module" src="./bootstrap.js?v=20260906-atl06-lines-v5"></script>
+  <script type="module" src="./bootstrap.js?v=20260906-atl06-core-v6"></script>
 </body>
 </html>
