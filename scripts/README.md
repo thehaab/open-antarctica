@@ -42,9 +42,7 @@ That file is a local discovery/provenance index. ATL06 is treated as dated along
 
 The discovery index does **not** mean the science granules have been downloaded or rendered.
 
-### Download and extract the nearest ATL06 science pass
-
-Create a Python environment with the NASA ingest dependencies:
+### NASA Python environment
 
 ```bash
 python3 -m venv .venv-nasa
@@ -52,7 +50,7 @@ source .venv-nasa/bin/activate
 python3 -m pip install -r scripts/requirements-nasa.txt
 ```
 
-Then download and extract the nearest dated ATL06 pass recorded in the local discovery index:
+### Download and extract the nearest ATL06 science pass
 
 ```bash
 python3 scripts/fetch_atl06.py \
@@ -85,10 +83,29 @@ data/processed/ferrar-glacier/nasa/atl06-rema-comparison.json
 
 It reports ATL06 minus REMA elevation deltas overall and by beam, including robust median/MAD statistics. It does not modify or vertically shift REMA. Differences can contain true elevation change because the REMA mosaic is a multi-date composite while the ATL06 pass is explicitly dated.
 
-After building the index, the local viewer reports the selected epoch. Add an epoch to the viewer URL with, for example:
+### Build a multi-date ATL06 temporal exploration set
+
+Once the single-pass path is validated, build several observations distributed across the ICESat-2 mission record:
+
+```bash
+python3 scripts/fetch_atl06_series.py \
+  --region ferrar-glacier \
+  --resolution 2m \
+  --passes 8
+```
+
+This command performs one mission-era CMR search, selects unique observation dates spread across the available record, downloads those ATL06 v007 passes through Earthdata, filters the six beams to the configured region, and samples the exact finest-level REMA viewer tiles underneath every retained measurement. It writes:
+
+```text
+data/processed/ferrar-glacier/nasa/atl06-series.json
+```
+
+The viewer detects this file automatically and exposes an **ATL06 observation** selector. Each selected pass remains explicitly dated and carries ATL06 `h_li`, REMA elevation, and `delta_h_m = ATL06 - REMA`. This sampled pass set is for temporal exploration; it is not yet a formal repeat-ground-track `dh/dt` product. ATL11 remains the planned repeat-track time-series authority.
+
+After building the index and science data, add an epoch to the viewer URL with, for example:
 
 ```text
 http://localhost:8000/app/?resolution=2m&epoch=2026-09-01
 ```
 
-Actual ATL06 track rendering follows this validation step.
+Add `&atl06debug=1` only while debugging overlay bounds. Debug helpers are part of the ATL06 layer and disappear when that layer is disabled.
