@@ -1,56 +1,60 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// Bridge stable viewer objects out of main.js without changing the known-good
-// terrain renderer. The ATL06 module is intentionally imported BEFORE main.js so
-// it can subscribe to the viewer-ready event before terrain streaming begins.
-const originalRender = THREE.WebGLRenderer.prototype.render;
+// Bridge the stable viewer objects out of main.js without touching the known-good
+// terrain engine. THREE.WebGLRenderer defines render on each renderer instance,
+// so patching WebGLRenderer.prototype.render does not intercept main.js. Instead,
+// capture the Scene/terrain Group through Scene.add and the camera/controls through
+// OrbitControls.update, then publish as soon as both sides exist.
 const originalControlsUpdate = OrbitControls.prototype.update;
 const originalSceneAdd = THREE.Scene.prototype.add;
 let bridgePublished = false;
+let sceneInstance = null;
 let controlsInstance = null;
 let terrainGroupInstance = null;
 
+function publishViewerBridge() {
+  if (bridgePublished || !sceneInstance || !controlsInstance || !terrainGroupInstance) return;
+
+  bridgePublished = true;
+  const camera = controlsInstance.object;
+  const api = {
+    scene: sceneInstance,
+    camera,
+    controls: controlsInstance,
+    terrainGroup: terrainGroupInstance,
+    requestRender() {
+      // main.js owns renderDirty. Dispatching the same controls event it already
+      // listens to asks the terrain loop for a render without exposing internals.
+      controlsInstance.dispatchEvent({ type: 'change' });
+    },
+  };
+
+  window.openAntarcticaViewer = api;
+  window.dispatchEvent(new CustomEvent('open-antarctica-viewer-ready', { detail: api }));
+}
+
 THREE.Scene.prototype.add = function openAntarcticaSceneAddBridge(...objects) {
   const result = originalSceneAdd.apply(this, objects);
+  sceneInstance = this;
+
   if (!terrainGroupInstance) {
     const candidate = objects.find((object) => object?.isGroup);
     if (candidate) {
       terrainGroupInstance = candidate;
       candidate.name = candidate.name || 'Open Antarctica REMA terrain';
-      if (window.openAntarcticaViewer) window.openAntarcticaViewer.terrainGroup = candidate;
     }
   }
+
+  publishViewerBridge();
   return result;
 };
 
 OrbitControls.prototype.update = function openAntarcticaControlsBridge(...args) {
   controlsInstance = this;
-  if (window.openAntarcticaViewer) window.openAntarcticaViewer.controls = this;
-  return originalControlsUpdate.apply(this, args);
-};
-
-THREE.WebGLRenderer.prototype.render = function openAntarcticaRenderBridge(scene, camera) {
-  if (!bridgePublished) {
-    bridgePublished = true;
-    const renderer = this;
-    const api = {
-      scene,
-      camera,
-      renderer,
-      controls: controlsInstance,
-      terrainGroup: terrainGroupInstance,
-      requestRender() {
-        requestAnimationFrame(() => originalRender.call(renderer, scene, camera));
-      },
-    };
-    window.openAntarcticaViewer = api;
-    window.dispatchEvent(new CustomEvent('open-antarctica-viewer-ready', { detail: api }));
-  } else if (window.openAntarcticaViewer) {
-    if (controlsInstance) window.openAntarcticaViewer.controls = controlsInstance;
-    if (terrainGroupInstance) window.openAntarcticaViewer.terrainGroup = terrainGroupInstance;
-  }
-  return originalRender.call(this, scene, camera);
+  const result = originalControlsUpdate.apply(this, args);
+  publishViewerBridge();
+  return result;
 };
 
 function showAtl06ModuleError(error) {
@@ -69,9 +73,8 @@ function showAtl06ModuleError(error) {
   }
 }
 
-// Start this import first. It does not need the viewer yet; it registers the
-// viewer-ready listener and gives us deterministic lifecycle diagnostics.
-const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-core-v7')
+// Register the science-layer listener before main.js creates the viewer.
+const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-core-v8')
   .catch((error) => {
     showAtl06ModuleError(error);
     return null;
