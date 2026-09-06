@@ -694,6 +694,8 @@ function animate(now = 0) {
     updateLOD();
   }
 
+  // Keep requestAnimationFrame alive for responsive controls, but do not submit a
+  // new WebGL frame unless the camera, terrain state, or UI actually changed.
   if (renderDirty && now - lastRenderTime >= MIN_RENDER_INTERVAL_MS) {
     renderer.render(scene, camera);
     lastRenderTime = now;
