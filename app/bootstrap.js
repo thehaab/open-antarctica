@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// Bridge the stable viewer objects out of main.js without changing the known-good
-// terrain renderer. The first THREE.Group added by main.js is its REMA terrain group.
+// Bridge stable viewer objects out of main.js without changing the known-good
+// terrain renderer. The ATL06 module is intentionally imported BEFORE main.js so
+// it can subscribe to the viewer-ready event before terrain streaming begins.
 const originalRender = THREE.WebGLRenderer.prototype.render;
 const originalControlsUpdate = OrbitControls.prototype.update;
 const originalSceneAdd = THREE.Scene.prototype.add;
@@ -52,12 +53,7 @@ THREE.WebGLRenderer.prototype.render = function openAntarcticaRenderBridge(scene
   return originalRender.call(this, scene, camera);
 };
 
-await import('./main.js?v=20260906-uniform-lod');
-await import('./nasa-time.js?v=20260906-atl11-series-v3');
-
-try {
-  await import('./atl06-overlay.js?v=20260906-atl06-core-v6');
-} catch (error) {
+function showAtl06ModuleError(error) {
   console.error('ATL06 overlay module failed to load:', error);
   const meta = document.getElementById('atl06Meta');
   const toggle = document.getElementById('atl06Toggle');
@@ -72,3 +68,15 @@ try {
       '<strong>Module load error:</strong> ' + String(error?.message || error);
   }
 }
+
+// Start this import first. It does not need the viewer yet; it registers the
+// viewer-ready listener and gives us deterministic lifecycle diagnostics.
+const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-core-v7')
+  .catch((error) => {
+    showAtl06ModuleError(error);
+    return null;
+  });
+
+await import('./main.js?v=20260906-uniform-lod');
+await import('./nasa-time.js?v=20260906-atl11-series-v3');
+await atl06ModulePromise;
