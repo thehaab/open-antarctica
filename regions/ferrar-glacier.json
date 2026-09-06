@@ -13,16 +13,33 @@
     "latitude": -77.8123,
     "longitude": 162.4794
   },
+  "temporal": {
+    "reference_epoch": null,
+    "selection_mode": "user-selected",
+    "policy": "Every dynamic observation must retain acquisition time; mismatched epochs are disclosed rather than silently fused.",
+    "static_or_reference_layers": [
+      "rema",
+      "lima"
+    ],
+    "dynamic_layers": [
+      "icesat2_atl06",
+      "icesat2_atl11",
+      "nisar"
+    ]
+  },
   "target_products": {
     "terrain_prototype": "REMA 10 m",
     "terrain_final_v0_0_1": "REMA 2 m",
-    "imagery": "USGS LIMA 15 m natural color"
+    "imagery": "USGS LIMA 15 m natural color",
+    "temporal_elevation": "NASA ICESat-2 ATL06 / ATL11",
+    "temporal_radar": "NASA-ISRO NISAR"
   },
   "sources": {
     "rema": {
       "version": "2.0",
       "crs": "EPSG:3031",
       "discovery": "PGC_REMA_v2_Tile_Index",
+      "temporal_role": "high-resolution geometric reference; source mosaic may combine multiple acquisition dates",
       "tiles": {
         "10m": [
           {
@@ -57,6 +74,7 @@
       "product": "Natural-color pan-sharpened LIMA, RGB 1X stretch",
       "crs": "EPSG:3031",
       "nominal_resolution_m": 15,
+      "temporal_role": "historical optical reference mosaic; not a single-date observation",
       "wms_version": "1.1.1",
       "wms_url": "https://nimbus.cr.usgs.gov/arcgis/services/Antarctica/USGS_EROS_Antarctica_LANDSAT/MapServer/WMSServer",
       "layers": [
@@ -67,6 +85,25 @@
         "LANDSAT_15M_RGB_1X_05",
         "LANDSAT_15M_RGB_1X_06"
       ]
+    },
+    "icesat2": {
+      "provider": "NASA / NSIDC",
+      "discovery": "NASA Common Metadata Repository (CMR)",
+      "products": {
+        "ATL06": {
+          "version": "007",
+          "role": "along-track land-ice surface height observations"
+        },
+        "ATL11": {
+          "version": "007",
+          "role": "repeat-track/crossover ice-sheet height time series"
+        }
+      }
+    },
+    "nisar": {
+      "provider": "NASA / ASF DAAC",
+      "role": "time-stamped radar backscatter, displacement, and change products",
+      "status": "future temporal layer"
     }
   }
 }
