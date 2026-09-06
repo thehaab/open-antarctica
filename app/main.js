@@ -61,11 +61,12 @@ const projectionView = new THREE.Matrix4();
 const boxScratch = new THREE.Box3();
 
 const MAX_CONCURRENT_LOADS = 6;
-const MAX_READY_TILES = 96;
+const MAX_READY_TILES = RESOLUTION === '2m' ? 160 : 96;
 const MAX_TARGET_VISIBLE_MOVING = RESOLUTION === '2m' ? 60 : 72;
-const MAX_TARGET_VISIBLE_SETTLED = RESOLUTION === '2m' ? 112 : 96;
+const MAX_TARGET_VISIBLE_SETTLED = RESOLUTION === '2m' ? 144 : 96;
 const SETTLE_REFINEMENT_DELAY_MS = 650;
-const TARGET_PIXEL_SPACING = RESOLUTION === '2m' ? 1.25 : 1.5;
+const TARGET_PIXEL_SPACING_MOVING = RESOLUTION === '2m' ? 1.25 : 1.5;
+const TARGET_PIXEL_SPACING_SETTLED = RESOLUTION === '2m' ? 0.65 : 0.9;
 const LOD_UPDATE_INTERVAL_MS = 90;
 const MAX_RENDER_FPS = RESOLUTION === '2m' ? 45 : 60;
 const MIN_RENDER_INTERVAL_MS = 1000 / MAX_RENDER_FPS;
@@ -531,13 +532,14 @@ function chooseTargetLevel() {
   const distance = Math.max(camera.position.distanceTo(controls.target), 250);
   const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
   const visibleBudget = settled ? MAX_TARGET_VISIBLE_SETTLED : MAX_TARGET_VISIBLE_MOVING;
+  const targetPixelSpacing = settled ? TARGET_PIXEL_SPACING_SETTLED : TARGET_PIXEL_SPACING_MOVING;
 
   let desired = lodMeta.lod.maxLevel;
   for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
     const bounds = tileBounds(level, 0, 0);
     const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
     const projectedPixels = spacing * focalPixels / distance;
-    if (projectedPixels <= TARGET_PIXEL_SPACING) {
+    if (projectedPixels <= targetPixelSpacing) {
       desired = level;
       break;
     }
@@ -695,6 +697,7 @@ async function loadLODTerrain(metaResponse) {
     `surface: native REMA relief; LIMA optional blend`,
     `GPU cache target: ${MAX_READY_TILES} tiles · ${MAX_CONCURRENT_LOADS} concurrent loads`,
     `moving tile budget: ${MAX_TARGET_VISIBLE_MOVING} · settled refine budget: ${MAX_TARGET_VISIBLE_SETTLED}`,
+    `LOD pixel target: ${TARGET_PIXEL_SPACING_MOVING.toFixed(2)} px moving · ${TARGET_PIXEL_SPACING_SETTLED.toFixed(2)} px settled`,
     `settled refinement delay: ${SETTLE_REFINEMENT_DELAY_MS} ms`,
     `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
     `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
