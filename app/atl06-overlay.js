@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 const toggleEl = document.getElementById('atl06Toggle');
 const terrainToggleEl = document.getElementById('terrainSurfaceToggle');
@@ -12,17 +15,31 @@ const DEBUG = params.get('atl06debug') === '1';
 const COMPARISON_URL = `../data/processed/${REGION}/nasa/atl06-rema-comparison.json`;
 const TERRAIN_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-lod.json`;
 
-// Display-only styling. ATL06 measurements remain at their measured h_li elevations.
+// ATL06 remains at measured h_li. This small lift is display-only and prevents
+// coincident-depth artifacts when the terrain surface is enabled.
 const DISPLAY_LIFT_M = 1.5;
 const MAX_LINE_GAP_M = 250;
-const RIBBON_WIDTH_M = 90;
-const HALO_WIDTH_M = 210;
+const BEAM_LINE_WIDTH_PX = 5;
+const BEAM_HALO_WIDTH_PX = 11;
+const POINT_SIZE_PX = 5;
+const POINT_HALO_SIZE_PX = 10;
+
+const BEAM_COLORS = {
+  gt1l: 0x00e5ff,
+  gt1r: 0x00ff9d,
+  gt2l: 0xd64dff,
+  gt2r: 0xff4db8,
+  gt3l: 0xffe94d,
+  gt3r: 0xff8a36,
+};
 
 let viewerApi = null;
 let terrainGroup = null;
 let overlayGroup = null;
 let loaded = false;
 let overlayBounds = null;
+let dominantTrackDirection = new THREE.Vector2(1, 0);
+const lineMaterials = new Set();
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
@@ -40,11 +57,19 @@ function requestRender() {
   viewerApi.requestRender?.();
 }
 
-function colorForDelta(delta) {
+function updateLineResolution() {
+  const width = Math.max(viewerApi?.renderer?.domElement?.clientWidth || window.innerWidth, 1);
+  const height = Math.max(viewerApi?.renderer?.domElement?.clientHeight || window.innerHeight, 1);
+  for (const material of lineMaterials) material.resolution.set(width, height);
+}
+
+function deltaColor(delta) {
   const value = Number(delta);
-  const t = Math.min(Math.abs(value) / 2.0, 1.0);
-  const neutral = new THREE.Color(0xffffff);
-  const endpoint = value < 0 ? new THREE.Color(0x00c8ff) : new THREE.Color(0xff6a00);
+  // Saturate by ~1.2 m because this validated pass agrees extremely closely with
+  // REMA; a ±2 m palette made almost every point visually white.
+  const t = Math.min(Math.abs(value) / 1.2, 1.0);
+  const neutral = new THREE.Color(0xf8fbff);
+  const endpoint = value < 0 ? new THREE.Color(0x00bfff) : new THREE.Color(0xff6500);
   return neutral.lerp(endpoint, t);
 }
 
@@ -53,9 +78,7 @@ function syncOverlayState() {
     overlayGroup.visible = Boolean(toggleEl?.checked);
     overlayGroup.scale.y = Number(exaggerationEl?.value || 1);
   }
-  if (terrainGroup && terrainToggleEl) {
-    terrainGroup.visible = Boolean(terrainToggleEl.checked);
-  }
+  if (terrainGroup && terrainToggleEl) terrainGroup.visible = Boolean(terrainToggleEl.checked);
   requestRender();
 }
 
@@ -79,102 +102,49 @@ function buildRuns(points) {
   return runs;
 }
 
-function ribbonGeometry(run, widthM, xOffset, zOffset, elevationMin, withColors) {
-  const n = run.length;
-  const positions = new Float32Array(n * 2 * 3);
-  const colors = withColors ? new Float32Array(n * 2 * 3) : null;
-  const indices = new Uint32Array((n - 1) * 6);
-  const half = widthM * 0.5;
-
-  let p = 0;
-  let c = 0;
-  for (let i = 0; i < n; i += 1) {
-    const point = run[i];
-    const prev = run[Math.max(0, i - 1)];
-    const next = run[Math.min(n - 1, i + 1)];
-    let dx = Number(next.x_m) - Number(prev.x_m);
-    let dz = Number(next.z_m) - Number(prev.z_m);
-    const length = Math.hypot(dx, dz) || 1;
-    dx /= length;
-    dz /= length;
-    const px = -dz * half;
-    const pz = dx * half;
-
-    const x = Number(point.x_m) + xOffset;
-    const y = Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M;
-    const z = Number(point.z_m) + zOffset;
-
-    positions[p++] = x + px;
-    positions[p++] = y;
-    positions[p++] = z + pz;
-    positions[p++] = x - px;
-    positions[p++] = y;
-    positions[p++] = z - pz;
-
-    if (colors) {
-      const color = colorForDelta(point.delta_h_m);
-      for (let side = 0; side < 2; side += 1) {
-        colors[c++] = color.r;
-        colors[c++] = color.g;
-        colors[c++] = color.b;
-      }
-    }
-  }
-
-  let k = 0;
-  for (let i = 0; i < n - 1; i += 1) {
-    const a = i * 2;
-    const b = a + 1;
-    const d = a + 2;
-    const e = a + 3;
-    indices[k++] = a;
-    indices[k++] = d;
-    indices[k++] = b;
-    indices[k++] = b;
-    indices[k++] = d;
-    indices[k++] = e;
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-  geometry.computeBoundingSphere();
-  return geometry;
+function trackPosition(point, xOffset, zOffset, elevationMin) {
+  return [
+    Number(point.x_m) + xOffset,
+    Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M,
+    Number(point.z_m) + zOffset,
+  ];
 }
 
-function addRunRibbon(run, xOffset, zOffset, elevationMin) {
-  const halo = new THREE.Mesh(
-    ribbonGeometry(run, HALO_WIDTH_M, xOffset, zOffset, elevationMin, false),
-    new THREE.MeshBasicMaterial({
-      color: 0x02070b,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.92,
-      depthTest: false,
-      depthWrite: false,
-      fog: false,
-    }),
-  );
-  halo.renderOrder = 60;
+function makeLineMaterial(color, linewidth, opacity, renderOrder) {
+  const material = new LineMaterial({
+    color,
+    linewidth,
+    worldUnits: false,
+    transparent: opacity < 1,
+    opacity,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  });
+  material.userData.renderOrder = renderOrder;
+  lineMaterials.add(material);
+  return material;
+}
+
+function addRunLine(run, beam, xOffset, zOffset, elevationMin) {
+  const flat = [];
+  for (const point of run) flat.push(...trackPosition(point, xOffset, zOffset, elevationMin));
+
+  const geometry = new LineGeometry();
+  geometry.setPositions(flat);
+
+  const halo = new Line2(geometry, makeLineMaterial(0x02060a, BEAM_HALO_WIDTH_PX, 0.96, 70));
+  halo.name = `ATL06 ${beam} line halo`;
+  halo.renderOrder = 70;
   halo.frustumCulled = false;
   overlayGroup.add(halo);
 
-  const ribbon = new THREE.Mesh(
-    ribbonGeometry(run, RIBBON_WIDTH_M, xOffset, zOffset, elevationMin, true),
-    new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 1,
-      depthTest: false,
-      depthWrite: false,
-      fog: false,
-    }),
-  );
-  ribbon.renderOrder = 61;
-  ribbon.frustumCulled = false;
-  overlayGroup.add(ribbon);
+  const color = BEAM_COLORS[beam] ?? 0x00e5ff;
+  const line = new Line2(geometry, makeLineMaterial(color, BEAM_LINE_WIDTH_PX, 1, 71));
+  line.name = `ATL06 ${beam} centerline`;
+  line.renderOrder = 71;
+  line.frustumCulled = false;
+  overlayGroup.add(line);
 }
 
 function addTrackPoints(points, beam, xOffset, zOffset, elevationMin) {
@@ -184,10 +154,11 @@ function addTrackPoints(points, beam, xOffset, zOffset, elevationMin) {
   let c = 0;
 
   for (const point of points) {
-    positions[p++] = Number(point.x_m) + xOffset;
-    positions[p++] = Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M;
-    positions[p++] = Number(point.z_m) + zOffset;
-    const color = colorForDelta(point.delta_h_m);
+    const [x, y, z] = trackPosition(point, xOffset, zOffset, elevationMin);
+    positions[p++] = x;
+    positions[p++] = y;
+    positions[p++] = z;
+    const color = deltaColor(point.delta_h_m);
     colors[c++] = color.r;
     colors[c++] = color.g;
     colors[c++] = color.b;
@@ -198,41 +169,44 @@ function addTrackPoints(points, beam, xOffset, zOffset, elevationMin) {
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geometry.computeBoundingSphere();
 
-  const halo = new THREE.Points(
-    geometry,
-    new THREE.PointsMaterial({
-      size: 12,
-      sizeAttenuation: false,
-      color: 0x02070b,
-      transparent: true,
-      opacity: 0.95,
-      depthTest: false,
-      depthWrite: false,
-      fog: false,
-    }),
-  );
-  halo.name = `ATL06 ${beam} halo`;
-  halo.renderOrder = 62;
+  const halo = new THREE.Points(geometry, new THREE.PointsMaterial({
+    size: POINT_HALO_SIZE_PX,
+    sizeAttenuation: false,
+    color: 0x02060a,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  }));
+  halo.name = `ATL06 ${beam} point halo`;
+  halo.renderOrder = 72;
   halo.frustumCulled = false;
   overlayGroup.add(halo);
 
-  const pointsObject = new THREE.Points(
-    geometry,
-    new THREE.PointsMaterial({
-      size: 7,
-      sizeAttenuation: false,
-      vertexColors: true,
-      transparent: true,
-      opacity: 1,
-      depthTest: false,
-      depthWrite: false,
-      fog: false,
-    }),
-  );
-  pointsObject.name = `ATL06 ${beam}`;
-  pointsObject.renderOrder = 63;
-  pointsObject.frustumCulled = false;
-  overlayGroup.add(pointsObject);
+  const dots = new THREE.Points(geometry, new THREE.PointsMaterial({
+    size: POINT_SIZE_PX,
+    sizeAttenuation: false,
+    vertexColors: true,
+    transparent: false,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  }));
+  dots.name = `ATL06 ${beam} measured points`;
+  dots.renderOrder = 73;
+  dots.frustumCulled = false;
+  overlayGroup.add(dots);
+}
+
+function deriveDominantDirection(longestRun) {
+  if (!longestRun || longestRun.length < 2) return;
+  const a = longestRun[0];
+  const b = longestRun[longestRun.length - 1];
+  const dx = Number(b.x_m) - Number(a.x_m);
+  const dz = Number(b.z_m) - Number(a.z_m);
+  const len = Math.hypot(dx, dz);
+  if (len > 1) dominantTrackDirection.set(dx / len, dz / len);
 }
 
 function focusOverlay() {
@@ -243,14 +217,39 @@ function focusOverlay() {
   const span = Math.max(size.x, size.z, 4000);
   const vertical = Math.max(size.y, 1200);
 
+  // Look mostly across the tracks rather than down their length. The old generic
+  // camera could make six narrow tracks collapse into an end-on terrain-like shape.
+  const perpX = -dominantTrackDirection.y;
+  const perpZ = dominantTrackDirection.x;
   viewerApi.controls.target.copy(center);
   viewerApi.camera.position.set(
-    center.x + span * 0.30,
-    center.y + Math.max(span * 0.34, vertical * 2.2),
-    center.z + span * 0.62,
+    center.x + perpX * span * 0.72 + dominantTrackDirection.x * span * 0.10,
+    center.y + Math.max(span * 0.48, vertical * 2.6),
+    center.z + perpZ * span * 0.72 + dominantTrackDirection.y * span * 0.10,
   );
   viewerApi.controls.update();
   requestRender();
+}
+
+function addDebugBounds() {
+  if (!DEBUG || !overlayBounds || !viewerApi) return;
+  const helper = new THREE.Box3Helper(overlayBounds, 0xff00ff);
+  helper.name = 'ATL06 debug bounds';
+  helper.renderOrder = 100;
+  helper.material.depthTest = false;
+  helper.material.depthWrite = false;
+  helper.material.fog = false;
+  viewerApi.scene.add(helper);
+
+  const center = overlayBounds.getCenter(new THREE.Vector3());
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(120, 16, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff00ff, depthTest: false, depthWrite: false, fog: false }),
+  );
+  marker.position.copy(center);
+  marker.name = 'ATL06 debug center';
+  marker.renderOrder = 101;
+  viewerApi.scene.add(marker);
 }
 
 async function buildOverlay() {
@@ -262,7 +261,6 @@ async function buildOverlay() {
       fetch(COMPARISON_URL, { cache: 'no-store' }),
       fetch(TERRAIN_META_URL, { cache: 'no-store' }),
     ]);
-
     if (!comparisonResponse.ok) throw new Error('ATL06/REMA comparison not built locally');
     if (!terrainResponse.ok) throw new Error(`Terrain metadata unavailable for ${RESOLUTION}`);
 
@@ -271,13 +269,8 @@ async function buildOverlay() {
     const origin = comparison.region?.local_origin;
     const extent = terrainMeta.extent;
     const elevationMin = Number(terrainMeta.elevation?.min);
-    if (!origin || !extent || !Number.isFinite(elevationMin)) {
-      throw new Error('ATL06 overlay metadata is incomplete');
-    }
+    if (!origin || !extent || !Number.isFinite(elevationMin)) throw new Error('ATL06 overlay metadata is incomplete');
 
-    // Bootstrap now exposes the exact terrain group captured when main.js adds it.
-    // Falling back to a guessed scene child caused the previous Terrain Surface
-    // checkbox to lie about what was actually hidden.
     terrainGroup = viewerApi.terrainGroup || null;
     if (!terrainGroup) throw new Error('Terrain bridge is not available');
 
@@ -288,45 +281,39 @@ async function buildOverlay() {
 
     overlayGroup = new THREE.Group();
     overlayGroup.name = 'ICESat-2 ATL06 dated science overlay';
-    overlayGroup.renderOrder = 60;
     overlayBounds = new THREE.Box3();
 
     let pointCount = 0;
     let beamCount = 0;
     let runCount = 0;
+    let longestRun = null;
+
     for (const track of comparison.tracks || []) {
       const points = Array.isArray(track.points) ? track.points : [];
       if (!points.length) continue;
+      const beam = track.beam || 'beam';
       beamCount += 1;
       pointCount += points.length;
 
       for (const point of points) {
-        overlayBounds.expandByPoint(new THREE.Vector3(
-          Number(point.x_m) + xOffset,
-          Number(point.h_li_m) - elevationMin + DISPLAY_LIFT_M,
-          Number(point.z_m) + zOffset,
-        ));
+        const [x, y, z] = trackPosition(point, xOffset, zOffset, elevationMin);
+        overlayBounds.expandByPoint(new THREE.Vector3(x, y, z));
       }
 
       const runs = buildRuns(points);
       runCount += runs.length;
-      for (const run of runs) addRunRibbon(run, xOffset, zOffset, elevationMin);
-      addTrackPoints(points, track.beam || 'beam', xOffset, zOffset, elevationMin);
+      for (const run of runs) {
+        if (!longestRun || run.length > longestRun.length) longestRun = run;
+        addRunLine(run, beam, xOffset, zOffset, elevationMin);
+      }
+      addTrackPoints(points, beam, xOffset, zOffset, elevationMin);
     }
 
     if (!pointCount || overlayBounds.isEmpty()) throw new Error('ATL06 overlay contains no drawable points');
-
+    deriveDominantDirection(longestRun);
     viewerApi.scene.add(overlayGroup);
-
-    if (DEBUG) {
-      const helper = new THREE.Box3Helper(overlayBounds, 0xff00ff);
-      helper.name = 'ATL06 debug bounds';
-      helper.renderOrder = 100;
-      helper.material.depthTest = false;
-      helper.material.depthWrite = false;
-      viewerApi.scene.add(helper);
-    }
-
+    addDebugBounds();
+    updateLineResolution();
     syncOverlayState();
     if (focusEl) focusEl.disabled = false;
 
@@ -335,14 +322,14 @@ async function buildOverlay() {
     const size = overlayBounds.getSize(new THREE.Vector3());
     metaEl.innerHTML = [
       '<strong>ICESat-2 ATL06 science overlay</strong>',
-      `Pass: ${esc(dateOnly(sourceTime))} · ${beamCount} beams · ${pointCount.toLocaleString()} segments · ${runCount} visible runs`,
+      `Pass: ${esc(dateOnly(sourceTime))} · ${beamCount} beams · ${pointCount.toLocaleString()} segments · ${runCount} runs`,
       `ATL06 − REMA median: ${Number(summary.median_m).toFixed(3)} m`,
       `RMSE: ${Number(summary.rmse_m).toFixed(3)} m · p05…p95: ${Number(summary.p05_m).toFixed(3)}…${Number(summary.p95_m).toFixed(3)} m`,
       `Track bounds: ${(size.x / 1000).toFixed(1)} × ${(size.z / 1000).toFixed(1)} km · terrain bridge: exact`,
-      'Color: cyan = below REMA · white ≈ agreement · orange = above REMA',
-      `<strong>X-ray display:</strong> ${RIBBON_WIDTH_M} m-wide colored center ribbons with ${HALO_WIDTH_M} m dark halos; these widths are visualization strokes, not ICESat-2 measurement footprints.`,
+      'Beam centerlines: cyan/green · magenta/pink · yellow/orange. Measured point color: cyan = below REMA · white ≈ agreement · orange = above REMA.',
+      `<strong>Display:</strong> ${BEAM_LINE_WIDTH_PX}px screen-space beam lines with ${BEAM_HALO_WIDTH_PX}px dark halos. No artificial world-space swath width is drawn.`,
       `<em>Measured ATL06 height; ${DISPLAY_LIFT_M.toFixed(1)} m display lift only. REMA is not corrected.</em>`,
-      DEBUG ? '<strong>Debug:</strong> magenta box = computed ATL06 bounds.' : '',
+      DEBUG ? '<strong>Debug:</strong> magenta box + sphere = computed ATL06 bounds/center.' : '',
     ].filter(Boolean).join('<br>');
   } catch (error) {
     if (toggleEl) {
@@ -371,6 +358,10 @@ if (focusEl) {
   focusEl.addEventListener('click', focusOverlay);
 }
 if (exaggerationEl) exaggerationEl.addEventListener('input', syncOverlayState);
+window.addEventListener('resize', () => {
+  updateLineResolution();
+  requestRender();
+});
 
 if (window.openAntarcticaViewer) {
   attach(window.openAntarcticaViewer);
