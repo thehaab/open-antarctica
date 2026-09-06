@@ -102,6 +102,26 @@ data/processed/ferrar-glacier/nasa/atl06-series.json
 
 The viewer detects this file automatically and exposes an **ATL06 observation** selector. Each selected pass remains explicitly dated and carries ATL06 `h_li`, REMA elevation, and `delta_h_m = ATL06 - REMA`. This sampled pass set is for temporal exploration; it is not yet a formal repeat-ground-track `dh/dt` product. ATL11 remains the planned repeat-track time-series authority.
 
+### Build mission-era ATL06 coverage overview
+
+To see where the full CMR mission record intersects the Ferrar crop without downloading hundreds of HDF5 granules, build the coverage/provenance layer:
+
+```bash
+python3 scripts/build_atl06_coverage.py \
+  --region ferrar-glacier \
+  --resolution 2m
+```
+
+This writes:
+
+```text
+data/processed/ferrar-glacier/nasa/atl06-coverage.json
+```
+
+The viewer then enables **ICESat-2 mission coverage**. The coverage layer prefers CMR line geometry where available; otherwise it derives a compact principal-axis centerline from each granule polygon or bounding box, clips it to the crop, and drapes it over the exact REMA viewer terrain. Repeated overlapping lines appear brighter.
+
+This is deliberately labeled a **CMR granule-footprint coverage proxy**. It is useful for answering where ICESat-2 repeatedly intersects the crop, but it is not the six exact laser-beam paths. Exact beam geometry still comes only from downloaded ATL06 HDF5 science data.
+
 After building the index and science data, add an epoch to the viewer URL with, for example:
 
 ```text
