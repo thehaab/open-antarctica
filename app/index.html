@@ -47,7 +47,9 @@
     </label>
 
     <label class="check"><input id="wireframeToggle" type="checkbox"> Wireframe</label>
-    <label class="check"><input id="atl06Toggle" type="checkbox" checked> ICESat-2 ATL06 overlay</label>
+    <label class="check"><input id="atl06Toggle" type="checkbox" checked> ICESat-2 ATL06 selected pass</label>
+    <label class="check"><input id="atl06CoverageToggle" type="checkbox" disabled> ICESat-2 mission coverage</label>
+    <div id="atl06CoverageLegend" class="science-legend" hidden>CMR footprint proxies · brighter = repeated coverage</div>
 
     <label id="atl06PassControl" class="select-control" hidden>
       <span>ATL06 observation</span>
@@ -63,6 +65,10 @@
     <div class="meta" id="temporalMeta">
       <strong>Time-aware NASA data</strong><br>
       NASA temporal index: checking…
+    </div>
+    <div class="meta" id="atl06CoverageMeta">
+      <strong>ICESat-2 mission coverage</strong><br>
+      Coverage index: checking…
     </div>
     <div class="meta" id="atl06Meta">
       <strong>ICESat-2 ATL06 science overlay</strong><br>
@@ -80,6 +86,6 @@
 
   <div class="hint">Drag to orbit · wheel to zoom · right-drag to pan</div>
 
-  <script type="module" src="./bootstrap.js?v=20260906-atl06-series-v9"></script>
+  <script type="module" src="./bootstrap.js?v=20260906-atl06-coverage-v10"></script>
 </body>
 </html>
