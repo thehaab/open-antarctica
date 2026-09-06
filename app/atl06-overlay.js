@@ -8,6 +8,7 @@ const exaggerationEl = document.getElementById('exaggeration');
 const params = new URLSearchParams(window.location.search);
 const REGION = params.get('region') || 'ferrar-glacier';
 const RESOLUTION = params.get('resolution') || '10m';
+const DEBUG = params.get('atl06debug') === '1';
 const COMPARISON_URL = `../data/processed/${REGION}/nasa/atl06-rema-comparison.json`;
 const TERRAIN_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terrain-lod.json`;
 
@@ -34,7 +35,9 @@ function dateOnly(value) {
 }
 
 function requestRender() {
-  viewerApi?.requestRender?.();
+  if (!viewerApi) return;
+  viewerApi.scene?.updateMatrixWorld?.(true);
+  viewerApi.requestRender?.();
 }
 
 function colorForDelta(delta) {
@@ -51,7 +54,7 @@ function syncOverlayState() {
     overlayGroup.scale.y = Number(exaggerationEl?.value || 1);
   }
   if (terrainGroup && terrainToggleEl) {
-    terrainGroup.visible = terrainToggleEl.checked;
+    terrainGroup.visible = Boolean(terrainToggleEl.checked);
   }
   requestRender();
 }
@@ -272,7 +275,11 @@ async function buildOverlay() {
       throw new Error('ATL06 overlay metadata is incomplete');
     }
 
-    terrainGroup = viewerApi.scene.children.find((child) => child.isGroup) || null;
+    // Bootstrap now exposes the exact terrain group captured when main.js adds it.
+    // Falling back to a guessed scene child caused the previous Terrain Surface
+    // checkbox to lie about what was actually hidden.
+    terrainGroup = viewerApi.terrainGroup || null;
+    if (!terrainGroup) throw new Error('Terrain bridge is not available');
 
     const terrainCenterX = (Number(extent.xmin) + Number(extent.xmax)) * 0.5;
     const terrainCenterY = (Number(extent.ymin) + Number(extent.ymax)) * 0.5;
@@ -307,21 +314,36 @@ async function buildOverlay() {
       addTrackPoints(points, track.beam || 'beam', xOffset, zOffset, elevationMin);
     }
 
+    if (!pointCount || overlayBounds.isEmpty()) throw new Error('ATL06 overlay contains no drawable points');
+
     viewerApi.scene.add(overlayGroup);
+
+    if (DEBUG) {
+      const helper = new THREE.Box3Helper(overlayBounds, 0xff00ff);
+      helper.name = 'ATL06 debug bounds';
+      helper.renderOrder = 100;
+      helper.material.depthTest = false;
+      helper.material.depthWrite = false;
+      viewerApi.scene.add(helper);
+    }
+
     syncOverlayState();
     if (focusEl) focusEl.disabled = false;
 
     const sourceTime = comparison.source?.atl06?.indexed_nearest_time;
     const summary = comparison.summary?.robust_points || comparison.summary?.all_points || {};
+    const size = overlayBounds.getSize(new THREE.Vector3());
     metaEl.innerHTML = [
       '<strong>ICESat-2 ATL06 science overlay</strong>',
       `Pass: ${esc(dateOnly(sourceTime))} · ${beamCount} beams · ${pointCount.toLocaleString()} segments · ${runCount} visible runs`,
       `ATL06 − REMA median: ${Number(summary.median_m).toFixed(3)} m`,
       `RMSE: ${Number(summary.rmse_m).toFixed(3)} m · p05…p95: ${Number(summary.p05_m).toFixed(3)}…${Number(summary.p95_m).toFixed(3)} m`,
+      `Track bounds: ${(size.x / 1000).toFixed(1)} × ${(size.z / 1000).toFixed(1)} km · terrain bridge: exact`,
       'Color: cyan = below REMA · white ≈ agreement · orange = above REMA',
       `<strong>X-ray display:</strong> ${RIBBON_WIDTH_M} m-wide colored center ribbons with ${HALO_WIDTH_M} m dark halos; these widths are visualization strokes, not ICESat-2 measurement footprints.`,
       `<em>Measured ATL06 height; ${DISPLAY_LIFT_M.toFixed(1)} m display lift only. REMA is not corrected.</em>`,
-    ].join('<br>');
+      DEBUG ? '<strong>Debug:</strong> magenta box = computed ATL06 bounds.' : '',
+    ].filter(Boolean).join('<br>');
   } catch (error) {
     if (toggleEl) {
       toggleEl.checked = false;
