@@ -17,12 +17,13 @@ const TERRAIN_META_URL = `../data/processed/${REGION}/viewer/${RESOLUTION}/terra
 
 const DISPLAY_LIFT_M = 5;
 const POINT_SIZE_PX = 6;
-const TREND_SATURATION_M_PER_YR = 0.5;
+const DEFAULT_TREND_SATURATION_M_PER_YR = 0.5;
 
 let viewerApi = null;
 let layerGroup = null;
 let trackRecords = [];
 let loaded = false;
+let trendSaturationMPerYr = DEFAULT_TREND_SATURATION_M_PER_YR;
 const raycaster = new THREE.Raycaster();
 raycaster.params.Points.threshold = 160;
 const pointer = new THREE.Vector2();
@@ -41,9 +42,20 @@ function requestRender() {
   viewerApi?.requestRender?.();
 }
 
+function chooseTrendSaturation(summary) {
+  const trend = summary?.trend_m_per_yr || {};
+  const p05 = Number(trend.p05);
+  const p95 = Number(trend.p95);
+  const robust = Math.max(Math.abs(p05), Math.abs(p95));
+  if (!Number.isFinite(robust) || robust <= 0) return DEFAULT_TREND_SATURATION_M_PER_YR;
+  // Use the central 90% of the observed same-place trends to set a useful visual
+  // scale, rounded upward to a calm 0.05 m/yr step and bounded across regions.
+  return THREE.MathUtils.clamp(Math.ceil(robust / 0.05) * 0.05, 0.10, 1.00);
+}
+
 function trendColor(value) {
   const trend = Number(value);
-  const t = Math.min(Math.abs(trend) / TREND_SATURATION_M_PER_YR, 1.0);
+  const t = Math.min(Math.abs(trend) / trendSaturationMPerYr, 1.0);
   const neutral = new THREE.Color(0xf7fbff);
   const endpoint = trend < 0 ? new THREE.Color(0x00aaff) : new THREE.Color(0xff7200);
   return neutral.lerp(endpoint, t);
@@ -235,6 +247,10 @@ async function buildLayer() {
     const elevationMin = Number(terrainMeta.elevation?.min);
     if (!Number.isFinite(elevationMin)) throw new Error('terrain elevation minimum unavailable');
 
+    const summary = data.summary || {};
+    const trend = summary.trend_m_per_yr || {};
+    trendSaturationMPerYr = chooseTrendSaturation(summary);
+
     layerGroup = new THREE.Group();
     layerGroup.name = 'ICESat-2 ATL11 repeat-track change layer';
     trackRecords = [];
@@ -259,12 +275,10 @@ async function buildLayer() {
           '<span class="legend-item"><span class="legend-swatch" style="background:#f7fbff"></span>stable</span>' +
           '<span class="legend-item"><span class="legend-swatch" style="background:#ff7200"></span>rising</span>' +
         '</div>',
-        `color saturates near ±${TREND_SATURATION_M_PER_YR.toFixed(1)} m/yr`,
+        `robust color scale ±${trendSaturationMPerYr.toFixed(2)} m/yr (p05/p95 based)`,
       ].join('<br>');
     }
 
-    const summary = data.summary || {};
-    const trend = summary.trend_m_per_yr || {};
     if (metaEl) {
       metaEl.innerHTML = [
         '<strong>ICESat-2 ATL11 repeat-track change</strong>',
@@ -272,6 +286,7 @@ async function buildLayer() {
         `${Number(summary.retained_ref_points || 0).toLocaleString()} repeat reference points · ${Number(summary.observation_count || 0).toLocaleString()} cycle observations`,
         `Coverage: ${esc(dateOnly(summary.coverage_start))} → ${esc(dateOnly(summary.coverage_end))}`,
         `Median dh/dt: ${Number(trend.median).toFixed(4)} m/yr · p05…p95 ${Number(trend.p05).toFixed(4)}…${Number(trend.p95).toFixed(4)} m/yr`,
+        `Display color scale: ±${trendSaturationMPerYr.toFixed(2)} m/yr`,
         '<em>These are ATL11 fixed reference-point time series. Color is same-place linear height trend, not ATL06-vs-REMA difference.</em>',
       ].join('<br>');
     }
