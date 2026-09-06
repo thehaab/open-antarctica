@@ -496,7 +496,7 @@ function updateFrustum() {
   lodFrustum.setFromProjectionMatrix(projectionView);
 }
 
-function tileIsVisible(level, x, y) {
+function setTileBox(level, x, y) {
   const bounds = tileBounds(level, x, y);
   const exaggeration = Number(exaggerationEl.value);
   const relief = (lodMeta.elevation.max - lodMeta.elevation.min) * exaggeration;
@@ -510,7 +510,15 @@ function tileIsVisible(level, x, y) {
     relief,
     bounds.centerZ + bounds.depth * 0.5,
   );
-  return lodFrustum.intersectsBox(boxScratch);
+  return boxScratch;
+}
+
+function tileIsVisible(level, x, y) {
+  return lodFrustum.intersectsBox(setTileBox(level, x, y));
+}
+
+function tileDistanceToCamera(level, x, y) {
+  return Math.max(setTileBox(level, x, y).distanceToPoint(camera.position), 250);
 }
 
 function visibleTileKeys(level) {
@@ -529,28 +537,41 @@ function visibleTileKeys(level) {
 function chooseTargetLevel() {
   const viewportHeight = Math.max(renderer.domElement.clientHeight, 1);
   const focalPixels = viewportHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5));
-  const distance = Math.max(camera.position.distanceTo(controls.target), 250);
   const settled = performance.now() - lastInteractionTime >= SETTLE_REFINEMENT_DELAY_MS;
   const visibleBudget = settled ? MAX_TARGET_VISIBLE_SETTLED : MAX_TARGET_VISIBLE_MOVING;
   const targetPixelSpacing = settled ? TARGET_PIXEL_SPACING_SETTLED : TARGET_PIXEL_SPACING_MOVING;
 
-  let desired = lodMeta.lod.maxLevel;
+  let finestBudgetLevel = 0;
+  let finestBudgetKeys = visibleTileKeys(0);
+
   for (let level = 0; level <= lodMeta.lod.maxLevel; level++) {
+    const keys = visibleTileKeys(level);
+    if (keys.length === 0) continue;
+    if (keys.length > visibleBudget) break;
+
+    finestBudgetLevel = level;
+    finestBudgetKeys = keys;
+
     const bounds = tileBounds(level, 0, 0);
     const spacing = Math.max(bounds.width, bounds.depth) / (lodMeta.lod.samples - 1);
-    const projectedPixels = spacing * focalPixels / distance;
+    let nearestDistance = Infinity;
+
+    for (const key of keys) {
+      const { x, y } = parseTileKey(key);
+      nearestDistance = Math.min(nearestDistance, tileDistanceToCamera(level, x, y));
+    }
+
+    if (!Number.isFinite(nearestDistance)) {
+      nearestDistance = Math.max(camera.position.distanceTo(controls.target), 250);
+    }
+
+    const projectedPixels = spacing * focalPixels / nearestDistance;
     if (projectedPixels <= targetPixelSpacing) {
-      desired = level;
-      break;
+      return { level, keys };
     }
   }
 
-  while (desired > 0) {
-    const keys = visibleTileKeys(desired);
-    if (keys.length <= visibleBudget) return { level: desired, keys };
-    desired -= 1;
-  }
-  return { level: 0, keys: visibleTileKeys(0) };
+  return { level: finestBudgetLevel, keys: finestBudgetKeys };
 }
 
 function allReady(keys) {
@@ -699,6 +720,7 @@ async function loadLODTerrain(metaResponse) {
     `moving tile budget: ${MAX_TARGET_VISIBLE_MOVING} · settled refine budget: ${MAX_TARGET_VISIBLE_SETTLED}`,
     `LOD pixel target: ${TARGET_PIXEL_SPACING_MOVING.toFixed(2)} px moving · ${TARGET_PIXEL_SPACING_SETTLED.toFixed(2)} px settled`,
     `settled refinement delay: ${SETTLE_REFINEMENT_DELAY_MS} ms`,
+    `LOD distance: nearest visible terrain`,
     `interactive render cap: ${MAX_RENDER_FPS} fps · renderer sleeps when idle`,
     `steady state uses one LOD level; LOD 0 remains underneath while streaming`,
   ].join('<br>');
