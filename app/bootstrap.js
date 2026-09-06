@@ -56,4 +56,4 @@ THREE.WebGLRenderer.prototype.render = function openAntarcticaRenderBridge(scene
 
 await import('./main.js?v=20260906-uniform-lod');
 await import('./nasa-time.js?v=20260906-atl11-series-v3');
-await import('./atl06-overlay.js?v=20260906-atl06-ribbon-v4');
+await import('./atl06-overlay.js?v=20260906-atl06-lines-v5');
