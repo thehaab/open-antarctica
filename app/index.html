@@ -48,8 +48,16 @@
 
     <label class="check"><input id="wireframeToggle" type="checkbox"> Wireframe</label>
     <label class="check"><input id="atl06Toggle" type="checkbox" checked> ICESat-2 ATL06 selected pass</label>
-    <label class="check"><input id="atl06CoverageToggle" type="checkbox" disabled> ICESat-2 mission coverage</label>
+    <label class="check"><input id="atl06CoverageToggle" type="checkbox"> ICESat-2 mission coverage</label>
     <div id="atl06CoverageLegend" class="science-legend" hidden>CMR footprint proxies · brighter = repeated coverage</div>
+
+    <label class="check"><input id="atl11Toggle" type="checkbox"> ICESat-2 ATL11 repeat-track change</label>
+    <label id="atl11TrackControl" class="select-control" hidden>
+      <span>ATL11 repeat track</span>
+      <select id="atl11TrackSelect" aria-label="ATL11 repeat track"></select>
+    </label>
+    <div id="atl11Legend" class="science-legend" hidden></div>
+    <button id="atl11Focus" type="button" disabled>Focus ATL11 track</button>
 
     <label id="atl06PassControl" class="select-control" hidden>
       <span>ATL06 observation</span>
@@ -70,6 +78,11 @@
       <strong>ICESat-2 mission coverage</strong><br>
       Coverage index: checking…
     </div>
+    <div class="meta" id="atl11Meta">
+      <strong>ICESat-2 ATL11 repeat-track change</strong><br>
+      ATL11 science layer: checking…
+    </div>
+    <div class="meta" id="atl11Inspect" hidden></div>
     <div class="meta" id="atl06Meta">
       <strong>ICESat-2 ATL06 science overlay</strong><br>
       Overlay module: loading…
@@ -86,6 +99,6 @@
 
   <div class="hint">Drag to orbit · wheel to zoom · right-drag to pan</div>
 
-  <script type="module" src="./bootstrap.js?v=20260906-atl06-coverage-v10"></script>
+  <script type="module" src="./bootstrap.js?v=20260906-atl11-change-v11"></script>
 </body>
 </html>
