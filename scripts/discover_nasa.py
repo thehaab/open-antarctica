@@ -5,15 +5,18 @@ This script queries NASA's Common Metadata Repository (CMR) for ICESat-2
 products intersecting a configured region and writes a compact local metadata
 index. It does not download science granules.
 
-The first query is always the exact user-requested time window. If that window
-contains no matching granules, the script performs a broader mission-era search
-and records the nearest available observations instead of making "0 matches"
-a dead end. Exact-window and nearest-observation results remain clearly
-separated so temporal provenance is never hidden.
+ATL06 is treated as a dated observation product: the first query is the exact
+user-requested time window, and if that window is empty a mission-era fallback
+finds observations nearest the reference epoch.
 
-The output is intentionally stored under data/processed/ (gitignored) so the
-browser can expose temporal provenance without committing large or ephemeral
-science metadata to the repository.
+ATL11 is different: each spatial granule is a repeat-track height time series,
+not a single acquisition. We therefore index spatially relevant ATL11 series
+over the mission era and do not pretend the granule metadata start date is the
+observation date nearest the selected epoch. Actual ATL11 cycle epochs must be
+read from the science HDF5 file.
+
+The output is stored under data/processed/ (gitignored) so the browser can
+expose temporal provenance without committing large or ephemeral science data.
 """
 
 from __future__ import annotations
@@ -35,9 +38,20 @@ PRODUCT_VERSIONS = {
     "ATL06": "007",
     "ATL11": "007",
 }
+PRODUCT_TEMPORAL_MODEL = {
+    "ATL06": "dated_observation",
+    "ATL11": "repeat_track_time_series",
+}
 PRODUCT_MISSION_START = {
     "ATL06": dt.datetime(2018, 10, 14, tzinfo=dt.timezone.utc),
     "ATL11": dt.datetime(2019, 3, 29, tzinfo=dt.timezone.utc),
+}
+PRODUCT_COLLECTION_TEMPORAL = {
+    "ATL11": {
+        "start": "2019-03-29T00:00:00Z",
+        "end": "present",
+        "nominal_resolution": "91 days",
+    },
 }
 CMR_GRANULES = "https://cmr.earthdata.nasa.gov/search/granules.json"
 
@@ -50,6 +64,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", required=True, help="UTC start date/time (YYYY-MM-DD or ISO-8601)")
     parser.add_argument("--end", required=True, help="UTC end date/time (YYYY-MM-DD or ISO-8601)")
     parser.add_argument(
+        "--epoch",
+        help="Optional reference epoch used to rank dated observations. Defaults to the search-window midpoint.",
+    )
+    parser.add_argument(
         "--products",
         nargs="+",
         default=list(DEFAULT_PRODUCTS),
@@ -61,7 +79,7 @@ def parse_args() -> argparse.Namespace:
         "--nearest-limit",
         type=int,
         default=8,
-        help="Number of nearest fallback granules to retain when the exact window is empty",
+        help="Number of fallback ATL06 granules or ATL11 series descriptors to retain locally",
     )
     parser.add_argument("--json", action="store_true", help="Print full JSON result to stdout")
     return parser.parse_args()
@@ -199,6 +217,108 @@ def temporal_distance_seconds(entry: dict, reference: dt.datetime) -> float:
     return abs((value - reference).total_seconds())
 
 
+def discover_atl06(
+    version: str,
+    bbox: list[float],
+    start: str,
+    end: str,
+    start_dt: dt.datetime,
+    end_dt: dt.datetime,
+    reference_dt: dt.datetime,
+    page_size: int,
+    nearest_limit: int,
+    now: dt.datetime,
+) -> dict:
+    print(f"[CMR] ATL06 v{version} exact window ...", file=sys.stderr)
+    exact_entries = cmr_search("ATL06", version, bbox, start, end, page_size)
+    exact_compact = [compact_entry("ATL06", version, entry) for entry in exact_entries]
+    print(f"[CMR] ATL06: {len(exact_entries)} exact-window granules", file=sys.stderr)
+
+    nearest_compact: list[dict] = []
+    fallback_window = None
+    if not exact_entries:
+        fallback_start_dt = PRODUCT_MISSION_START["ATL06"]
+        fallback_end_dt = max(min(now, end_dt), start_dt)
+        if fallback_end_dt < fallback_start_dt:
+            fallback_end_dt = now
+        fallback_start = format_utc(fallback_start_dt)
+        fallback_end = format_utc(fallback_end_dt)
+        fallback_window = {"start": fallback_start, "end": fallback_end}
+        print(
+            f"[CMR] ATL06: no exact match; searching mission-era observations "
+            f"{fallback_start} -> {fallback_end} ...",
+            file=sys.stderr,
+        )
+        fallback_entries = cmr_search(
+            "ATL06", version, bbox, fallback_start, fallback_end, page_size
+        )
+        fallback_compact = [compact_entry("ATL06", version, entry) for entry in fallback_entries]
+        fallback_compact.sort(key=lambda entry: temporal_distance_seconds(entry, reference_dt))
+        nearest_compact = fallback_compact[: max(nearest_limit, 0)]
+        print(
+            f"[CMR] ATL06: {len(fallback_entries)} mission-era matches; "
+            f"retaining {len(nearest_compact)} nearest",
+            file=sys.stderr,
+        )
+
+    nearest_days = None
+    nearest_relation = None
+    if nearest_compact:
+        nearest_time = entry_time(nearest_compact[0])
+        if nearest_time is not None:
+            signed_days = (nearest_time - reference_dt).total_seconds() / 86400.0
+            nearest_days = round(abs(signed_days), 3)
+            nearest_relation = "after" if signed_days > 0 else "before" if signed_days < 0 else "at"
+
+    return {
+        "version": version,
+        "temporal_model": PRODUCT_TEMPORAL_MODEL["ATL06"],
+        "granule_count": len(exact_compact),
+        "exact_granule_count": len(exact_compact),
+        "granules": exact_compact,
+        "nearest_granules": nearest_compact,
+        "nearest_distance_days": nearest_days,
+        "nearest_relation": nearest_relation,
+        "fallback_window": fallback_window,
+    }
+
+
+def discover_atl11(
+    version: str,
+    bbox: list[float],
+    page_size: int,
+    retain_limit: int,
+    now: dt.datetime,
+) -> dict:
+    mission_start = PRODUCT_MISSION_START["ATL11"]
+    mission_end = now
+    start = format_utc(mission_start)
+    end = format_utc(mission_end)
+    print(
+        f"[CMR] ATL11 v{version} spatial time-series index {start} -> {end} ...",
+        file=sys.stderr,
+    )
+    entries = cmr_search("ATL11", version, bbox, start, end, page_size)
+    compact = [compact_entry("ATL11", version, entry) for entry in entries]
+    retained = compact[: max(retain_limit, 0)]
+    print(
+        f"[CMR] ATL11: {len(entries)} spatial time-series granules; retaining {len(retained)} descriptors",
+        file=sys.stderr,
+    )
+    return {
+        "version": version,
+        "temporal_model": PRODUCT_TEMPORAL_MODEL["ATL11"],
+        "series_granule_count": len(compact),
+        "series_granules": retained,
+        "collection_temporal_coverage": PRODUCT_COLLECTION_TEMPORAL["ATL11"],
+        "notes": [
+            "ATL11 granules are repeat-track height time series, not single-date observations.",
+            "Do not interpret CMR granule time_start as the observation nearest a selected epoch.",
+            "Actual cycle epochs and heights must be read from the ATL11 HDF5 science data.",
+        ],
+    }
+
+
 def main() -> int:
     args = parse_args()
     region = load_region(args.region)
@@ -212,69 +332,44 @@ def main() -> int:
     if end_dt < start_dt:
         raise SystemExit("--end must not be earlier than --start")
 
-    reference_dt = start_dt + (end_dt - start_dt) / 2
+    if args.epoch:
+        reference_dt = parse_utc(normalize_time(args.epoch))
+        reference_source = "explicit_epoch"
+    else:
+        reference_dt = start_dt + (end_dt - start_dt) / 2
+        reference_source = "search_window_midpoint"
+
     wgs84_bbox = transform_bbox_3031_to_wgs84(region["bbox"])
     now = dt.datetime.now(dt.timezone.utc)
 
     results: dict[str, dict] = {}
     for product in args.products:
         version = PRODUCT_VERSIONS[product]
-        print(f"[CMR] {product} v{version} exact window ...", file=sys.stderr)
-        exact_entries = cmr_search(product, version, wgs84_bbox, start, end, args.page_size)
-        exact_compact = [compact_entry(product, version, entry) for entry in exact_entries]
-        print(f"[CMR] {product}: {len(exact_entries)} exact-window granules", file=sys.stderr)
-
-        nearest_compact: list[dict] = []
-        fallback_window = None
-        if not exact_entries:
-            fallback_start_dt = PRODUCT_MISSION_START[product]
-            fallback_end_dt = max(min(now, end_dt), start_dt)
-            if fallback_end_dt < fallback_start_dt:
-                fallback_end_dt = now
-            fallback_start = format_utc(fallback_start_dt)
-            fallback_end = format_utc(fallback_end_dt)
-            fallback_window = {"start": fallback_start, "end": fallback_end}
-            print(
-                f"[CMR] {product}: no exact match; searching mission-era observations "
-                f"{fallback_start} -> {fallback_end} ...",
-                file=sys.stderr,
-            )
-            fallback_entries = cmr_search(
-                product,
+        if product == "ATL06":
+            results[product] = discover_atl06(
                 version,
                 wgs84_bbox,
-                fallback_start,
-                fallback_end,
+                start,
+                end,
+                start_dt,
+                end_dt,
+                reference_dt,
                 args.page_size,
+                args.nearest_limit,
+                now,
             )
-            fallback_compact = [compact_entry(product, version, entry) for entry in fallback_entries]
-            fallback_compact.sort(key=lambda entry: temporal_distance_seconds(entry, reference_dt))
-            nearest_compact = fallback_compact[: max(args.nearest_limit, 0)]
-            print(
-                f"[CMR] {product}: {len(fallback_entries)} mission-era matches; "
-                f"retaining {len(nearest_compact)} nearest",
-                file=sys.stderr,
+        elif product == "ATL11":
+            results[product] = discover_atl11(
+                version,
+                wgs84_bbox,
+                args.page_size,
+                args.nearest_limit,
+                now,
             )
-
-        nearest_days = None
-        if nearest_compact:
-            distance = temporal_distance_seconds(nearest_compact[0], reference_dt)
-            if distance != float("inf"):
-                nearest_days = round(distance / 86400.0, 3)
-
-        results[product] = {
-            "version": version,
-            "granule_count": len(exact_compact),
-            "exact_granule_count": len(exact_compact),
-            "granules": exact_compact,
-            "nearest_granules": nearest_compact,
-            "nearest_distance_days": nearest_days,
-            "fallback_window": fallback_window,
-        }
 
     generated = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     output = {
-        "schema": "open-antarctica-nasa-temporal-index-v2",
+        "schema": "open-antarctica-nasa-temporal-index-v3",
         "generated_at": generated,
         "region": {
             "id": region["id"],
@@ -287,13 +382,14 @@ def main() -> int:
             "start": start,
             "end": end,
             "reference_time": format_utc(reference_dt),
+            "reference_source": reference_source,
             "products": args.products,
         },
         "products": results,
         "notes": [
             "This is a discovery/provenance index, not downloaded science data.",
-            "Exact-window results and nearest fallback observations are intentionally kept separate.",
-            "ATL06 is along-track land-ice height; ATL11 is a repeat-track/crossover height time series.",
+            "ATL06 is a dated along-track land-ice height observation product.",
+            "ATL11 is a spatially organized repeat-track height time series; its internal cycle dates must be read from HDF5.",
             "Actual science granule access may require NASA Earthdata Login.",
         ],
     }
@@ -308,13 +404,25 @@ def main() -> int:
     else:
         print(f"NASA temporal index: {out_path}")
         print(f"WGS84 bbox: {', '.join(f'{v:.6f}' for v in wgs84_bbox)}")
-        print(f"Reference time: {format_utc(reference_dt)}")
+        print(f"Reference time: {format_utc(reference_dt)} ({reference_source})")
         for product in args.products:
             info = results[product]
+            if info.get("temporal_model") == "repeat_track_time_series":
+                coverage = info["collection_temporal_coverage"]
+                print(
+                    f"{product} v{info['version']}: {info['series_granule_count']} spatial time-series granules; "
+                    f"collection coverage {coverage['start'][:10]} -> {coverage['end']} ({coverage['nominal_resolution']})"
+                )
+                continue
+
             line = f"{product} v{info['version']}: {info['exact_granule_count']} exact-window granules"
             if info["nearest_granules"]:
                 nearest = info["nearest_granules"][0]
-                line += f"; nearest {nearest.get('time_start') or nearest.get('time_end')} ({info['nearest_distance_days']} days)"
+                relation = info.get("nearest_relation") or "from"
+                line += (
+                    f"; nearest {nearest.get('time_start') or nearest.get('time_end')} "
+                    f"({info['nearest_distance_days']} days {relation} reference)"
+                )
             print(line)
     return 0
 
