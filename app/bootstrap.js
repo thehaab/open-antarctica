@@ -3,15 +3,25 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // Bridge the stable viewer objects out of main.js without touching the known-good
 // terrain engine. THREE.WebGLRenderer defines render on each renderer instance,
-// so patching WebGLRenderer.prototype.render does not intercept main.js. Instead,
-// capture the Scene/terrain Group through Scene.add and the camera/controls through
-// OrbitControls.update, then publish as soon as both sides exist.
+// so capture the Scene/terrain Group through Scene.add and the camera/controls
+// through OrbitControls.update, then publish as soon as both sides exist.
 const originalControlsUpdate = OrbitControls.prototype.update;
 const originalSceneAdd = THREE.Scene.prototype.add;
+const terrainSurfaceToggleEl = document.getElementById('terrainSurfaceToggle');
 let bridgePublished = false;
 let sceneInstance = null;
 let controlsInstance = null;
 let terrainGroupInstance = null;
+
+function requestMainRender() {
+  if (controlsInstance) controlsInstance.dispatchEvent({ type: 'change' });
+}
+
+function syncTerrainSurface() {
+  if (!terrainGroupInstance || !terrainSurfaceToggleEl) return;
+  terrainGroupInstance.visible = Boolean(terrainSurfaceToggleEl.checked);
+  requestMainRender();
+}
 
 function publishViewerBridge() {
   if (bridgePublished || !sceneInstance || !controlsInstance || !terrainGroupInstance) return;
@@ -23,14 +33,11 @@ function publishViewerBridge() {
     camera,
     controls: controlsInstance,
     terrainGroup: terrainGroupInstance,
-    requestRender() {
-      // main.js owns renderDirty. Dispatching the same controls event it already
-      // listens to asks the terrain loop for a render without exposing internals.
-      controlsInstance.dispatchEvent({ type: 'change' });
-    },
+    requestRender: requestMainRender,
   };
 
   window.openAntarcticaViewer = api;
+  syncTerrainSurface();
   window.dispatchEvent(new CustomEvent('open-antarctica-viewer-ready', { detail: api }));
 }
 
@@ -43,6 +50,7 @@ THREE.Scene.prototype.add = function openAntarcticaSceneAddBridge(...objects) {
     if (candidate) {
       terrainGroupInstance = candidate;
       candidate.name = candidate.name || 'Open Antarctica REMA terrain';
+      syncTerrainSurface();
     }
   }
 
@@ -56,6 +64,8 @@ OrbitControls.prototype.update = function openAntarcticaControlsBridge(...args) 
   publishViewerBridge();
   return result;
 };
+
+if (terrainSurfaceToggleEl) terrainSurfaceToggleEl.addEventListener('change', syncTerrainSurface);
 
 function showAtl06ModuleError(error) {
   console.error('ATL06 overlay module failed to load:', error);
@@ -74,7 +84,7 @@ function showAtl06ModuleError(error) {
 }
 
 // Register the science-layer listener before main.js creates the viewer.
-const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-core-v8')
+const atl06ModulePromise = import('./atl06-overlay.js?v=20260906-atl06-series-v9')
   .catch((error) => {
     showAtl06ModuleError(error);
     return null;
